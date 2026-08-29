@@ -1,106 +1,122 @@
-import React, { useEffect } from "react";
-
+import React, { useEffect, useRef } from "react";
 import {
-  View,
+  Animated,
+  SafeAreaView,
+  StatusBar,
+  StyleSheet,
   Text,
   TouchableOpacity,
-  StyleSheet,
-  SafeAreaView,
+  View,
 } from "react-native";
 
 import SocketService from "../services/SocketService";
 
 export default function IncomingCallScreen({ route, navigation }) {
   const {
-    callerId,
-    callerName,
-    receiverId,
+    callerId = "customer_101",
+    callerName = "Customer",
+    receiverId = "driver_201",
+    offer = null,
     callType = "voice",
   } = route.params || {};
 
+  const pulseAnim = useRef(new Animated.Value(1)).current;
+
   useEffect(() => {
-    console.log("📞 Incoming call");
+    // Pulsating animation for incoming ring
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseAnim, {
+          toValue: 1.2,
+          duration: 800,
+          useNativeDriver: true,
+        }),
+        Animated.timing(pulseAnim, {
+          toValue: 1,
+          duration: 800,
+          useNativeDriver: true,
+        }),
+      ]),
+    ).start();
 
-    console.log("Caller:", callerId);
+    // If caller cancels or ends call while ringing
+    const handleCallEnded = () => {
+      console.log("🛑 Caller cancelled incoming call");
+      navigation.goBack();
+    };
 
-    console.log("Receiver:", receiverId);
+    SocketService.onCallEnded(handleCallEnded);
 
     return () => {
-      console.log("IncomingCallScreen cleanup");
+      SocketService.off("callEnded", handleCallEnded);
     };
-  }, [callerId, receiverId]);
+  }, [navigation, pulseAnim]);
 
-  // =========================
-  // ACCEPT
-  // =========================
-
-  const acceptCall = () => {
-    console.log("📞 Call accepted:", callerId, "->", receiverId);
-
-    SocketService.acceptCall(callerId, receiverId);
-
+  const handleAccept = () => {
+    console.log("📞 [DRIVER ACCEPT CALL] Accepting call from:", callerId);
     navigation.replace("VoiceCallScreen", {
       callerId,
       callerName,
       receiverId,
+      offer,
       callType,
     });
   };
 
-  // =========================
-  // REJECT
-  // =========================
-
-  const rejectCall = () => {
-    console.log("❌ Call rejected:", callerId, "->", receiverId);
-
+  const handleDecline = () => {
+    console.log("❌ [DRIVER DECLINE CALL] Declining call from:", callerId);
     SocketService.rejectCall(callerId, receiverId);
-
     navigation.goBack();
   };
 
   return (
     <SafeAreaView style={styles.container}>
-      <View style={styles.content}>
-        {/* AVATAR */}
+      <StatusBar barStyle="light-content" backgroundColor="#0A0F1D" />
 
-        <View style={styles.avatar}>
-          <Text style={styles.avatarText}>
-            {callerName ? callerName.charAt(0) : "C"}
-          </Text>
-        </View>
+      {/* Top Banner */}
+      <View style={styles.topSection}>
+        <Text style={styles.appTag}>CAB DISPATCH VOICE</Text>
+        <Text style={styles.incomingLabel}>Incoming Voice Call...</Text>
+      </View>
 
-        {/* TITLE */}
+      {/* Center Caller Profile */}
+      <View style={styles.centerSection}>
+        <Animated.View
+          style={[styles.avatarGlow, { transform: [{ scale: pulseAnim }] }]}
+        >
+          <View style={styles.avatar}>
+            <Text style={styles.avatarText}>
+              {callerName ? callerName.charAt(0).toUpperCase() : "C"}
+            </Text>
+          </View>
+        </Animated.View>
 
-        <Text style={styles.incoming}>Incoming Call</Text>
+        <Text style={styles.callerName}>{callerName || "Customer"}</Text>
+        <Text style={styles.callerId}>Rider ID: {callerId}</Text>
+        <Text style={styles.callTypeLabel}>WhatsApp-Style HD Audio</Text>
+      </View>
 
-        {/* CALLER */}
-
-        <Text style={styles.name}>{callerName || "Customer"}</Text>
-
-        {/* CALL TYPE */}
-
-        <Text style={styles.callType}>
-          {callType === "video" ? "Video Call" : "Voice Call"}
-        </Text>
-
-        {/* BUTTONS */}
-
-        <View style={styles.buttons}>
-          {/* REJECT */}
-
-          <TouchableOpacity style={styles.rejectButton} onPress={rejectCall}>
-            <Text style={styles.buttonIcon}>✕</Text>
-
-            <Text style={styles.buttonText}>Decline</Text>
+      {/* WhatsApp Style Accept / Decline Buttons */}
+      <View style={styles.bottomSection}>
+        <View style={styles.buttonRow}>
+          {/* Decline Button (Red) */}
+          <TouchableOpacity
+            style={styles.declineBtn}
+            onPress={handleDecline}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.btnIcon}>✕</Text>
+            <Text style={styles.btnText}>Decline</Text>
           </TouchableOpacity>
 
-          {/* ACCEPT */}
-
-          <TouchableOpacity style={styles.acceptButton} onPress={acceptCall}>
-            <Text style={styles.buttonIcon}>☎</Text>
-
-            <Text style={styles.buttonText}>Accept</Text>
+          {/* Accept Button (Green) */}
+          <TouchableOpacity
+            style={styles.acceptBtn}
+            onPress={handleAccept}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.btnIcon}>☎</Text>
+            <Text style={styles.btnText}>Accept</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -111,81 +127,115 @@ export default function IncomingCallScreen({ route, navigation }) {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#FFFFFF",
+    backgroundColor: "#0A0F1D",
+    justifyContent: "space-between",
+    paddingHorizontal: 20,
   },
-
-  content: {
-    flex: 1,
-    justifyContent: "center",
+  topSection: {
     alignItems: "center",
-    padding: 30,
+    paddingTop: 36,
   },
-
-  avatar: {
-    width: 110,
-    height: 110,
-    borderRadius: 55,
-    backgroundColor: "#1677FF",
-    justifyContent: "center",
-    alignItems: "center",
-    marginBottom: 25,
+  appTag: {
+    color: "#38BDF8",
+    fontSize: 11,
+    fontWeight: "800",
+    letterSpacing: 1.5,
   },
-
-  avatarText: {
-    fontSize: 48,
-    color: "#FFFFFF",
-    fontWeight: "bold",
-  },
-
-  incoming: {
+  incomingLabel: {
+    color: "#E2E8F0",
     fontSize: 18,
-    color: "#777777",
-    marginBottom: 10,
-  },
-
-  name: {
-    fontSize: 30,
-    fontWeight: "bold",
-  },
-
-  callType: {
-    fontSize: 16,
-    color: "#777777",
+    fontWeight: "700",
     marginTop: 8,
   },
-
-  buttons: {
+  centerSection: {
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  avatarGlow: {
+    width: 150,
+    height: 150,
+    borderRadius: 75,
+    backgroundColor: "rgba(34, 197, 94, 0.2)",
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 24,
+  },
+  avatar: {
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    backgroundColor: "#16A34A",
+    alignItems: "center",
+    justifyContent: "center",
+    elevation: 10,
+    shadowColor: "#22C55E",
+    shadowOpacity: 0.5,
+    shadowRadius: 20,
+  },
+  avatarText: {
+    color: "#FFFFFF",
+    fontSize: 52,
+    fontWeight: "800",
+  },
+  callerName: {
+    color: "#FFFFFF",
+    fontSize: 28,
+    fontWeight: "800",
+  },
+  callerId: {
+    color: "#94A3B8",
+    fontSize: 14,
+    marginTop: 4,
+    fontFamily: "monospace",
+  },
+  callTypeLabel: {
+    color: "#22C55E",
+    fontSize: 12,
+    fontWeight: "700",
+    marginTop: 12,
+    letterSpacing: 0.5,
+  },
+  bottomSection: {
+    paddingBottom: 54,
+  },
+  buttonRow: {
     flexDirection: "row",
-    marginTop: 70,
-    gap: 40,
-  },
-
-  rejectButton: {
-    width: 100,
-    height: 100,
-    borderRadius: 50,
-    backgroundColor: "#E53935",
-    justifyContent: "center",
+    justifyContent: "space-around",
     alignItems: "center",
+    paddingHorizontal: 20,
   },
-
-  acceptButton: {
-    width: 100,
-    height: 100,
-    borderRadius: 50,
-    backgroundColor: "#20B957",
-    justifyContent: "center",
+  declineBtn: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: "#DC2626",
     alignItems: "center",
+    justifyContent: "center",
+    elevation: 6,
+    shadowColor: "#DC2626",
+    shadowOpacity: 0.5,
+    shadowRadius: 10,
   },
-
-  buttonIcon: {
+  acceptBtn: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: "#16A34A",
+    alignItems: "center",
+    justifyContent: "center",
+    elevation: 6,
+    shadowColor: "#16A34A",
+    shadowOpacity: 0.5,
+    shadowRadius: 10,
+  },
+  btnIcon: {
     color: "#FFFFFF",
     fontSize: 28,
   },
-
-  buttonText: {
+  btnText: {
     color: "#FFFFFF",
-    fontWeight: "bold",
-    marginTop: 5,
+    fontSize: 11,
+    fontWeight: "800",
+    marginTop: 2,
   },
 });

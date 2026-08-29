@@ -1,5 +1,7 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
+  ActivityIndicator,
+  Alert,
   KeyboardAvoidingView,
   Platform,
   SafeAreaView,
@@ -11,7 +13,10 @@ import {
   View,
 } from "react-native";
 
+import NativeSocketService from "../services/NativeSocketService";
 import SocketService from "../services/SocketService";
+import { getUserSession, saveUserSession } from "../services/AuthSession";
+import { WS_URL } from "../config/AppConfig";
 
 const PRESET_CUSTOMERS = [
   {
@@ -33,8 +38,43 @@ export default function CustomerLoginScreen({ navigation }) {
   const [customId, setCustomId] = useState("");
   const [customName, setCustomName] = useState("");
   const [isCustom, setIsCustom] = useState(false);
+  const [isConnecting, setIsConnecting] = useState(false);
+  const [isCheckingSession, setIsCheckingSession] = useState(true);
 
-  const handleLogin = (idToUse, nameToUse) => {
+  // ── Auto-Login on App Launch ──────────────────────────────
+  useEffect(() => {
+    let isMounted = true;
+    (async () => {
+      try {
+        const savedSession = await getUserSession();
+        if (savedSession && savedSession.userId && isMounted) {
+          console.log("⚡ [AUTO-LOGIN] Found saved customer session:", savedSession);
+          setIsConnecting(true);
+          // Start socket background service
+          NativeSocketService.start(WS_URL, savedSession.userId, "client", 5000).catch((e) =>
+            console.warn("[AutoLogin] Native start error:", e),
+          );
+          SocketService.connect(savedSession.userId);
+          setIsConnecting(false);
+          navigation.replace("CustomerHomeScreen", {
+            userId: savedSession.userId,
+            userName: savedSession.userName || savedSession.userId,
+          });
+          return;
+        }
+      } catch (err) {
+        console.warn("[AutoLogin] Check error:", err);
+      } finally {
+        if (isMounted) setIsCheckingSession(false);
+      }
+    })();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [navigation]);
+
+  const handleLogin = async (idToUse, nameToUse) => {
     const finalId = idToUse || (isCustom ? customId.trim() : selectedId);
     const finalName =
       nameToUse ||
@@ -42,16 +82,54 @@ export default function CustomerLoginScreen({ navigation }) {
         ? customName.trim() || finalId
         : PRESET_CUSTOMERS.find((c) => c.id === finalId)?.name || finalId);
 
-    if (!finalId) return;
+    if (!finalId) {
+      Alert.alert("Required", "Please select or enter a Customer ID");
+      return;
+    }
 
-    // Connect socket with this user ID
-    SocketService.connect(finalId);
+    setIsConnecting(true);
 
-    navigation.replace("CustomerHomeScreen", {
-      userId: finalId,
-      userName: finalName,
-    });
+    try {
+      console.log(`[CUSTOMER LOGIN] Initializing native socket for ${finalId} at ${WS_URL}`);
+
+      // Save persistent session so user stays logged in
+      await saveUserSession({
+        userId: finalId,
+        userName: finalName,
+      });
+
+      // Start Native Android OkHttp WebSocket Foreground Service & await registration
+      await NativeSocketService.start(WS_URL, finalId, "client", 8000);
+
+      // Connect Socket.io for WebRTC calls
+      SocketService.connect(finalId);
+
+      setIsConnecting(false);
+
+      navigation.replace("CustomerHomeScreen", {
+        userId: finalId,
+        userName: finalName,
+      });
+    } catch (error) {
+      console.error("[CUSTOMER LOGIN] Socket connection error:", error);
+      setIsConnecting(false);
+      // Navigate gracefully
+      navigation.replace("CustomerHomeScreen", {
+        userId: finalId,
+        userName: finalName,
+      });
+    }
   };
+
+  if (isCheckingSession) {
+    return (
+      <SafeAreaView style={[styles.safeArea, styles.loadingScreen]}>
+        <StatusBar barStyle="light-content" backgroundColor="#1E3A8A" />
+        <ActivityIndicator size="large" color="#FFFFFF" />
+        <Text style={styles.loadingScreenText}>Loading Cab Connect...</Text>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -65,7 +143,7 @@ export default function CustomerLoginScreen({ navigation }) {
           <Text style={styles.appTag}>CAB CONNECT</Text>
           <Text style={styles.headerTitle}>Customer Portal</Text>
           <Text style={styles.headerSubtitle}>
-            Select your customer profile or enter custom credentials to start
+            Native Android OkHttp WebSocket & WebRTC Calling
           </Text>
         </View>
 
@@ -86,6 +164,7 @@ export default function CustomerLoginScreen({ navigation }) {
                   setIsCustom(false);
                   setSelectedId(cust.id);
                 }}
+                disabled={isConnecting}
                 activeOpacity={0.8}
               >
                 <View style={styles.profileInfo}>
@@ -127,6 +206,7 @@ export default function CustomerLoginScreen({ navigation }) {
           <TouchableOpacity
             style={[styles.customCard, isCustom && styles.profileCardActive]}
             onPress={() => setIsCustom(true)}
+            disabled={isConnecting}
             activeOpacity={0.8}
           >
             <View style={styles.nameRow}>
@@ -151,6 +231,7 @@ export default function CustomerLoginScreen({ navigation }) {
                   value={customId}
                   onChangeText={setCustomId}
                   autoCapitalize="none"
+                  editable={!isConnecting}
                 />
 
                 <Text style={[styles.inputLabel, { marginTop: 10 }]}>
@@ -162,6 +243,7 @@ export default function CustomerLoginScreen({ navigation }) {
                   placeholderTextColor="#94A3B8"
                   value={customName}
                   onChangeText={setCustomName}
+                  editable={!isConnecting}
                 />
               </View>
             )}
@@ -171,11 +253,19 @@ export default function CustomerLoginScreen({ navigation }) {
         {/* Submit Button */}
         <View style={styles.footer}>
           <TouchableOpacity
-            style={styles.loginButton}
+            style={[styles.loginButton, isConnecting && styles.loginButtonDisabled]}
             onPress={() => handleLogin()}
+            disabled={isConnecting}
             activeOpacity={0.85}
           >
-            <Text style={styles.loginButtonText}>LOGIN AS CUSTOMER</Text>
+            {isConnecting ? (
+              <View style={styles.loadingRow}>
+                <ActivityIndicator color="#FFFFFF" size="small" />
+                <Text style={styles.loginButtonText}>CONNECTING...</Text>
+              </View>
+            ) : (
+              <Text style={styles.loginButtonText}>LOGIN AS CUSTOMER</Text>
+            )}
           </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>
@@ -187,6 +277,17 @@ const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
     backgroundColor: "#1E3A8A",
+  },
+  loadingScreen: {
+    justifyContent: "center",
+    alignItems: "center",
+    backgroundColor: "#1E3A8A",
+  },
+  loadingScreenText: {
+    color: "#FFFFFF",
+    fontSize: 16,
+    fontWeight: "700",
+    marginTop: 14,
   },
   container: {
     flex: 1,
@@ -366,6 +467,14 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.25,
     shadowRadius: 8,
     shadowOffset: { width: 0, height: 4 },
+  },
+  loginButtonDisabled: {
+    backgroundColor: "#60A5FA",
+  },
+  loadingRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
   },
   loginButtonText: {
     color: "#FFFFFF",

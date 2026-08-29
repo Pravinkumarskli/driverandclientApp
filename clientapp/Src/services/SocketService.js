@@ -1,7 +1,7 @@
 import { io } from "socket.io-client";
+import { SOCKET_URL } from "../config/AppConfig";
 
-// Configured for local Wi-Fi / physical devices & emulator
-const SERVER_URL = "http://192.168.1.104:3000";
+const SERVER_URL = SOCKET_URL;
 
 class SocketService {
   socket = null;
@@ -12,7 +12,7 @@ class SocketService {
 
     if (this.socket) {
       if (this.socket.connected && userId) {
-        this.socket.emit("register", userId);
+        this.socket.emit("register", { userId, userType: "client" });
       }
       return;
     }
@@ -29,7 +29,10 @@ class SocketService {
     this.socket.on("connect", () => {
       console.log("SOCKET CONNECTED:", this.socket.id);
       if (this.currentUserId) {
-        this.socket.emit("register", this.currentUserId);
+        this.socket.emit("register", {
+          userId: this.currentUserId,
+          userType: "client",
+        });
       }
     });
 
@@ -86,6 +89,18 @@ class SocketService {
     this.on("incomingCall", callback);
   }
 
+  onCallAccepted(callback) {
+    this.on("callAccepted", callback);
+  }
+
+  onCallRejected(callback) {
+    this.on("callRejected", callback);
+  }
+
+  onCallEnded(callback) {
+    this.on("callEnded", callback);
+  }
+
   onOffer(callback) {
     this.on("offer", callback);
   }
@@ -102,6 +117,33 @@ class SocketService {
     this.socket?.emit("callUser", data);
   }
 
+  callUser(callerId, receiverId, callerName = "Customer", offer = null) {
+    this.socket?.emit("callUser", {
+      callerId,
+      senderId: callerId,
+      receiverId,
+      callerName,
+      senderName: callerName,
+      offer,
+    });
+  }
+
+  acceptCall(callerId, receiverId) {
+    this.socket?.emit("acceptCall", {
+      callerId,
+      receiverId,
+      senderId: this.currentUserId,
+    });
+  }
+
+  rejectCall(callerId, receiverId) {
+    this.socket?.emit("rejectCall", {
+      callerId,
+      receiverId,
+      senderId: this.currentUserId,
+    });
+  }
+
   sendOffer(data) {
     this.socket?.emit("offer", data);
   }
@@ -115,11 +157,14 @@ class SocketService {
   }
 
   endCall(data) {
-    this.socket?.emit("endCall", data);
-  }
-
-  rejectCall(data) {
-    this.socket?.emit("rejectCall", data);
+    if (typeof data === "object") {
+      this.socket?.emit("endCall", data);
+    } else {
+      this.socket?.emit("endCall", {
+        senderId: this.currentUserId,
+        receiverId: data,
+      });
+    }
   }
 
   // ------------------------------------------

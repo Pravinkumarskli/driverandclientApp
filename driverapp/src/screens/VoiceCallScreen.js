@@ -1,143 +1,255 @@
-import React, { useEffect, useState } from "react";
-
+import React, { useEffect, useRef, useState } from "react";
 import {
-  View,
+  Alert,
+  PermissionsAndroid,
+  Platform,
+  SafeAreaView,
+  StatusBar,
+  StyleSheet,
   Text,
   TouchableOpacity,
-  StyleSheet,
-  SafeAreaView,
+  View,
 } from "react-native";
 
 import SocketService from "../services/SocketService";
+import WebRTCService from "../services/WebRTCService";
 
 export default function VoiceCallScreen({ route, navigation }) {
-  const { callerId, receiverId, callerName } = route.params || {};
+  const {
+    callerId = "customer_101",
+    callerName = "Customer",
+    receiverId = "driver_201",
+    offer = null,
+  } = route.params || {};
 
   const [callStatus, setCallStatus] = useState("Connecting...");
-
+  const [connected, setConnected] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
+  const [isSpeaker, setIsSpeaker] = useState(false);
+  const [callSeconds, setCallSeconds] = useState(0);
 
+  const timerRef = useRef(null);
+
+  // Call duration timer
   useEffect(() => {
-    console.log("Voice call screen");
-
-    console.log("Caller:", callerId);
-
-    console.log("Receiver:", receiverId);
-
-    setCallStatus("Connecting...");
-
-    // Customer receives this
-    // after Driver accepts
-
-    const handleCallAccepted = (data) => {
-      console.log("Call accepted:", data);
-
-      setCallStatus("Connected");
-    };
-
-    // Customer receives this
-    // when Driver rejects
-
-    const handleCallRejected = (data) => {
-      console.log("Call rejected:", data);
-
-      setCallStatus("Call declined");
-
-      setTimeout(() => {
-        navigation.goBack();
+    if (connected) {
+      timerRef.current = setInterval(() => {
+        setCallSeconds((s) => s + 1);
       }, 1000);
-    };
-
-    SocketService.on("callAccepted", handleCallAccepted);
-
-    SocketService.on("callRejected", handleCallRejected);
-
+    }
     return () => {
-      SocketService.off("callAccepted", handleCallAccepted);
-
-      SocketService.off("callRejected", handleCallRejected);
+      if (timerRef.current) clearInterval(timerRef.current);
     };
-  }, []);
+  }, [connected]);
 
-  // =========================
-  // MUTE
-  // =========================
-
-  const toggleMute = () => {
-    setIsMuted((previous) => !previous);
-
-    console.log("Microphone:", isMuted ? "ON" : "OFF");
-
-    // Later:
-    // WebRTC audio track
-    // will be enabled/disabled here
+  const formatTimer = (totalSeconds) => {
+    const min = Math.floor(totalSeconds / 60);
+    const sec = totalSeconds % 60;
+    return `${String(min).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
   };
 
-  // =========================
-  // END CALL
-  // =========================
+  const requestMicrophonePermission = async () => {
+    if (Platform.OS !== "android") return true;
+    try {
+      const granted = await PermissionsAndroid.request(
+        PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+      );
+      return granted === PermissionsAndroid.RESULTS.GRANTED;
+    } catch (error) {
+      console.warn("MIC PERMISSION ERROR:", error);
+      return false;
+    }
+  };
 
-  const endCall = () => {
-    console.log("Ending call");
+  useEffect(() => {
+    let isMounted = true;
 
+    const setupVoiceCall = async () => {
+      try {
+        setCallStatus("Opening microphone...");
+        const hasMic = await requestMicrophonePermission();
+        if (!hasMic) {
+          Alert.alert("Permission Required", "Microphone access is required for calls.");
+          navigation.goBack();
+          return;
+        }
+
+        // 1. Create PeerConnection
+        WebRTCService.createPeerConnection(
+          (candidate) => {
+            console.log("📡 [DRIVER] Sending ICE Candidate to:", callerId);
+            SocketService.sendIceCandidate({
+              senderId: receiverId,
+              receiverId: callerId,
+              candidate: candidate,
+            });
+          },
+          (remoteStream) => {
+            console.log("🎤 [DRIVER] Remote audio stream received!");
+            if (isMounted) {
+              setConnected(true);
+              setCallStatus("Connected");
+            }
+          },
+        );
+
+        // 2. Add local audio
+        await WebRTCService.getLocalAudio();
+
+        // 3. Handle Offer & Send Answer
+        const handleReceivedOffer = async (incomingOffer) => {
+          try {
+            console.log("📡 [DRIVER] Processing Offer from caller:", callerId);
+            await WebRTCService.setRemoteOffer(incomingOffer);
+            const answer = await WebRTCService.createAnswer();
+            console.log("📡 [DRIVER] Sending Answer to caller:", callerId);
+            SocketService.sendAnswer({
+              senderId: receiverId,
+              receiverId: callerId,
+              answer: answer,
+            });
+
+            // Also emit acceptCall
+            SocketService.acceptCall(callerId, receiverId);
+
+            if (isMounted) {
+              setConnected(true);
+              setCallStatus("Connected");
+            }
+          } catch (e) {
+            console.warn("[DRIVER] Error answering offer:", e);
+          }
+        };
+
+        if (offer) {
+          await handleReceivedOffer(offer);
+        } else {
+          // Listen for incoming offer if not in route params
+          SocketService.onOffer(async (data) => {
+            if (data?.offer) {
+              await handleReceivedOffer(data.offer);
+            }
+          });
+        }
+
+        // 4. Listen for ICE candidates from Customer
+        SocketService.onIceCandidate(async (data) => {
+          if (data?.candidate) {
+            await WebRTCService.addIceCandidate(data.candidate);
+          }
+        });
+
+        // 5. Listen for Call Ended from Customer
+        SocketService.onCallEnded(() => {
+          console.log("🛑 [DRIVER] Customer ended call");
+          if (isMounted) {
+            setCallStatus("Call Ended");
+            setTimeout(() => navigation.goBack(), 800);
+          }
+        });
+      } catch (err) {
+        console.error("[DRIVER] VOICE CALL ERROR:", err);
+        Alert.alert("Call Error", err?.message || "Failed to connect call");
+        navigation.goBack();
+      }
+    };
+
+    setupVoiceCall();
+
+    return () => {
+      isMounted = false;
+      WebRTCService.close();
+      SocketService.off("offer");
+      SocketService.off("iceCandidate");
+      SocketService.off("callEnded");
+    };
+  }, [callerId, navigation, offer, receiverId]);
+
+  const handleToggleMute = () => {
+    const next = !isMuted;
+    setIsMuted(next);
+    WebRTCService.setMuted(next);
+  };
+
+  const handleToggleSpeaker = () => {
+    const next = !isSpeaker;
+    setIsSpeaker(next);
+    // Future inCallManager or audio manager speaker toggle
+  };
+
+  const handleEndCall = () => {
+    console.log("🛑 [DRIVER] Ending call");
+    SocketService.endCall({
+      senderId: receiverId,
+      receiverId: callerId,
+    });
+    WebRTCService.close();
     navigation.goBack();
   };
 
   return (
     <SafeAreaView style={styles.container}>
-      {/* TOP */}
+      <StatusBar barStyle="light-content" backgroundColor="#0A0F1D" />
 
-      <View style={styles.top}>
-        <Text style={styles.title}>Voice Call</Text>
-
-        <Text style={styles.status}>{callStatus}</Text>
+      {/* Top Header */}
+      <View style={styles.topSection}>
+        <Text style={styles.appTag}>CAB DISPATCH ACTIVE CALL</Text>
+        <Text style={styles.securityTag}>🔒 End-to-end encrypted voice</Text>
       </View>
 
-      {/* CENTER */}
-
-      <View style={styles.center}>
-        <View style={styles.avatar}>
-          <Text style={styles.avatarText}>
-            {callerName ? callerName.charAt(0).toUpperCase() : "C"}
-          </Text>
+      {/* Center Section */}
+      <View style={styles.centerSection}>
+        <View style={[styles.avatarGlow, connected && styles.avatarGlowConnected]}>
+          <View style={styles.avatar}>
+            <Text style={styles.avatarText}>
+              {callerName ? callerName.charAt(0).toUpperCase() : "C"}
+            </Text>
+          </View>
         </View>
 
-        <Text style={styles.name}>{callerName || callerId || "Customer"}</Text>
+        <Text style={styles.callerName}>{callerName || "Customer"}</Text>
+        <Text style={styles.callerId}>Rider ID: {callerId}</Text>
 
-        <Text style={styles.callStatus}>{callStatus}</Text>
+        <View style={styles.statusBadge}>
+          <Text style={[styles.statusText, connected && styles.statusTextConnected]}>
+            {connected ? `🎤 ${formatTimer(callSeconds)}` : callStatus}
+          </Text>
+        </View>
       </View>
 
-      {/* CONTROLS */}
+      {/* WhatsApp Style Bottom Controls */}
+      <View style={styles.bottomControls}>
+        <View style={styles.controlsRow}>
+          {/* Mute Button */}
+          <TouchableOpacity
+            style={[styles.actionBtn, isMuted && styles.actionBtnActive]}
+            onPress={handleToggleMute}
+            activeOpacity={0.7}
+          >
+            <Text style={styles.actionIcon}>{isMuted ? "🔇" : "🎤"}</Text>
+            <Text style={styles.actionLabel}>{isMuted ? "Unmute" : "Mute"}</Text>
+          </TouchableOpacity>
 
-      <View style={styles.controls}>
-        {/* MUTE */}
+          {/* Speaker Button */}
+          <TouchableOpacity
+            style={[styles.actionBtn, isSpeaker && styles.actionBtnActive]}
+            onPress={handleToggleSpeaker}
+            activeOpacity={0.7}
+          >
+            <Text style={styles.actionIcon}>{isSpeaker ? "🔊" : "🔈"}</Text>
+            <Text style={styles.actionLabel}>{isSpeaker ? "Speaker" : "Ear"}</Text>
+          </TouchableOpacity>
 
-        <TouchableOpacity
-          style={[styles.controlButton, isMuted && styles.activeButton]}
-          onPress={toggleMute}
-        >
-          <Text style={styles.controlIcon}>{isMuted ? "🔇" : "🎤"}</Text>
-
-          <Text style={styles.controlText}>{isMuted ? "Unmute" : "Mute"}</Text>
-        </TouchableOpacity>
-
-        {/* SPEAKER */}
-
-        <TouchableOpacity style={styles.controlButton}>
-          <Text style={styles.controlIcon}>🔊</Text>
-
-          <Text style={styles.controlText}>Speaker</Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* END CALL */}
-
-      <View style={styles.bottom}>
-        <TouchableOpacity style={styles.endCallButton} onPress={endCall}>
-          <Text style={styles.endCallIcon}>☎</Text>
-        </TouchableOpacity>
-
-        <Text style={styles.endCallText}>End Call</Text>
+          {/* End Call Button */}
+          <TouchableOpacity
+            style={styles.endCallBtn}
+            onPress={handleEndCall}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.endCallIcon}>☎</Text>
+            <Text style={styles.endCallLabel}>End</Text>
+          </TouchableOpacity>
+        </View>
       </View>
     </SafeAreaView>
   );
@@ -146,117 +258,136 @@ export default function VoiceCallScreen({ route, navigation }) {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#111827",
+    backgroundColor: "#0A0F1D",
+    justifyContent: "space-between",
   },
-
-  top: {
+  topSection: {
     alignItems: "center",
-    paddingTop: 25,
+    paddingTop: 24,
+    gap: 4,
   },
-
-  title: {
-    color: "#FFFFFF",
-    fontSize: 20,
+  appTag: {
+    color: "#38BDF8",
+    fontSize: 12,
+    fontWeight: "800",
+    letterSpacing: 1.5,
+  },
+  securityTag: {
+    color: "#64748B",
+    fontSize: 11,
     fontWeight: "600",
   },
-
-  status: {
-    color: "#9CA3AF",
-    fontSize: 15,
-    marginTop: 8,
-  },
-
-  center: {
-    flex: 1,
-    justifyContent: "center",
+  centerSection: {
     alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 20,
   },
-
-  avatar: {
+  avatarGlow: {
     width: 140,
     height: 140,
     borderRadius: 70,
-    backgroundColor: "#1677FF",
-    justifyContent: "center",
+    backgroundColor: "rgba(56, 189, 248, 0.2)",
     alignItems: "center",
-    marginBottom: 25,
+    justifyContent: "center",
+    marginBottom: 24,
   },
-
+  avatarGlowConnected: {
+    backgroundColor: "rgba(34, 197, 94, 0.2)",
+  },
+  avatar: {
+    width: 110,
+    height: 110,
+    borderRadius: 55,
+    backgroundColor: "#0284C7",
+    alignItems: "center",
+    justifyContent: "center",
+    elevation: 8,
+    shadowColor: "#38BDF8",
+    shadowOpacity: 0.5,
+    shadowRadius: 16,
+  },
   avatarText: {
     color: "#FFFFFF",
-    fontSize: 60,
-    fontWeight: "bold",
+    fontSize: 48,
+    fontWeight: "800",
   },
-
-  name: {
+  callerName: {
     color: "#FFFFFF",
-    fontSize: 30,
-    fontWeight: "bold",
+    fontSize: 26,
+    fontWeight: "800",
   },
-
-  callStatus: {
-    color: "#9CA3AF",
-    fontSize: 17,
-    marginTop: 10,
-  },
-
-  controls: {
-    flexDirection: "row",
-    justifyContent: "center",
-    gap: 35,
-    marginBottom: 45,
-  },
-
-  controlButton: {
-    width: 75,
-    height: 75,
-    borderRadius: 38,
-    backgroundColor: "#374151",
-    justifyContent: "center",
-    alignItems: "center",
-  },
-
-  activeButton: {
-    backgroundColor: "#6B7280",
-  },
-
-  controlIcon: {
-    fontSize: 25,
-  },
-
-  controlText: {
-    color: "#FFFFFF",
-    fontSize: 11,
+  callerId: {
+    color: "#94A3B8",
+    fontSize: 13,
     marginTop: 4,
+    fontFamily: Platform.OS === "ios" ? "Courier" : "monospace",
   },
-
-  bottom: {
+  statusBadge: {
+    marginTop: 18,
+    backgroundColor: "rgba(255, 255, 255, 0.08)",
+    paddingVertical: 8,
+    paddingHorizontal: 20,
+    borderRadius: 20,
+  },
+  statusText: {
+    color: "#FBBF24",
+    fontSize: 15,
+    fontWeight: "700",
+    letterSpacing: 0.5,
+  },
+  statusTextConnected: {
+    color: "#34D399",
+  },
+  bottomControls: {
+    paddingBottom: 48,
+    paddingHorizontal: 30,
+  },
+  controlsRow: {
+    flexDirection: "row",
+    justifyContent: "space-around",
     alignItems: "center",
-    paddingBottom: 35,
   },
-
-  endCallButton: {
-    width: 75,
-    height: 75,
-    borderRadius: 38,
-    backgroundColor: "#EF4444",
+  actionBtn: {
+    width: 68,
+    height: 68,
+    borderRadius: 34,
+    backgroundColor: "rgba(255, 255, 255, 0.12)",
+    alignItems: "center",
     justifyContent: "center",
-    alignItems: "center",
   },
-
+  actionBtnActive: {
+    backgroundColor: "#0284C7",
+  },
+  actionIcon: {
+    fontSize: 24,
+  },
+  actionLabel: {
+    color: "#E2E8F0",
+    fontSize: 10,
+    fontWeight: "700",
+    marginTop: 2,
+  },
+  endCallBtn: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: "#DC2626",
+    alignItems: "center",
+    justifyContent: "center",
+    elevation: 6,
+    shadowColor: "#DC2626",
+    shadowOpacity: 0.5,
+    shadowRadius: 10,
+  },
   endCallIcon: {
     color: "#FFFFFF",
-    fontSize: 32,
-    transform: [
-      {
-        rotate: "135deg",
-      },
-    ],
+    fontSize: 28,
+    transform: [{ rotate: "135deg" }],
   },
-
-  endCallText: {
+  endCallLabel: {
     color: "#FFFFFF",
-    fontSize: 13,
-    marginTop: 8,
+    fontSize: 10,
+    fontWeight: "800",
+    marginTop: 1,
   },
 });

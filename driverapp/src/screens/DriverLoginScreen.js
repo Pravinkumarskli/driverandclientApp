@@ -1,5 +1,7 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
+  ActivityIndicator,
+  Alert,
   KeyboardAvoidingView,
   Platform,
   SafeAreaView,
@@ -11,7 +13,10 @@ import {
   View,
 } from "react-native";
 
+import NativeSocketService from "../services/NativeSocketService";
 import SocketService from "../services/SocketService";
+import { getDriverSession, saveDriverSession } from "../services/AuthSession";
+import { WS_URL } from "../config/AppConfig";
 
 const PRESET_DRIVERS = [
   {
@@ -42,28 +47,107 @@ export default function DriverLoginScreen({ navigation }) {
   const [customId, setCustomId] = useState("");
   const [customName, setCustomName] = useState("");
   const [isCustom, setIsCustom] = useState(false);
+  const [isConnecting, setIsConnecting] = useState(false);
+  const [isCheckingSession, setIsCheckingSession] = useState(true);
 
-  const handleLogin = (idToUse, nameToUse) => {
-    const finalId = idToUse || (isCustom ? customId.trim() : selectedId);
-    const finalDriver = PRESET_DRIVERS.find((d) => d.id === finalId);
-    const finalName =
-      nameToUse ||
-      (isCustom
-        ? customName.trim() || finalId
-        : finalDriver?.name || finalId);
-    const finalCar = isCustom ? "Custom Cab" : finalDriver?.car || "Cab";
+  // ── Auto-Login on App Launch ──────────────────────────────
+  useEffect(() => {
+    let isMounted = true;
+    (async () => {
+      try {
+        const savedSession = await getDriverSession();
+        if (savedSession && savedSession.driverId && isMounted) {
+          console.log("⚡ [AUTO-LOGIN] Found saved driver session:", savedSession);
+          setIsConnecting(true);
+          // Start background socket service
+          NativeSocketService.start(WS_URL, savedSession.driverId, "driver", 5000).catch((e) =>
+            console.warn("[AutoLogin] Native start error:", e),
+          );
+          SocketService.connect(savedSession.driverId);
+          setIsConnecting(false);
+          navigation.replace("DriverHome", {
+            driverId: savedSession.driverId,
+            driverName: savedSession.driverName || savedSession.driverId,
+            vehicle: savedSession.vehicle || "Cab",
+          });
+          return;
+        }
+      } catch (err) {
+        console.warn("[AutoLogin] Check error:", err);
+      } finally {
+        if (isMounted) setIsCheckingSession(false);
+      }
+    })();
 
-    if (!finalId) return;
+    return () => {
+      isMounted = false;
+    };
+  }, [navigation]);
 
-    // Connect socket with this driver ID
-    SocketService.connect(finalId);
+  const handleLogin = async (idToUse, nameToUse) => {
+    try {
+      const finalId = idToUse || (isCustom ? customId.trim() : selectedId);
 
-    navigation.replace("DriverHome", {
-      driverId: finalId,
-      driverName: finalName,
-      vehicle: finalCar,
-    });
+      const finalDriver = PRESET_DRIVERS.find((d) => d.id === finalId);
+
+      const finalName =
+        nameToUse ||
+        (isCustom
+          ? customName.trim() || finalId
+          : finalDriver?.name || finalId);
+
+      const finalCar = isCustom ? "Custom Cab" : finalDriver?.car || "Cab";
+
+      if (!finalId) {
+        Alert.alert("Required", "Please select or enter a Driver ID");
+        return;
+      }
+
+      setIsConnecting(true);
+
+      console.log(`[DRIVER LOGIN] Initializing native socket for ${finalId} at ${WS_URL}`);
+
+      // Save persistent session
+      await saveDriverSession({
+        driverId: finalId,
+        driverName: finalName,
+        vehicle: finalCar,
+      });
+
+      // Start Native Android OkHttp WebSocket Foreground Service & await registration
+      await NativeSocketService.start(WS_URL, finalId, "driver", 8000);
+
+      // Connect Socket.io for WebRTC calls
+      SocketService.connect(finalId);
+
+      setIsConnecting(false);
+
+      navigation.replace("DriverHome", {
+        driverId: finalId,
+        driverName: finalName,
+        vehicle: finalCar,
+      });
+    } catch (error) {
+      console.error("[DRIVER LOGIN] Socket connection error:", error);
+      setIsConnecting(false);
+      // Navigate gracefully
+      navigation.replace("DriverHome", {
+        driverId: finalId,
+        driverName: finalName,
+        vehicle: finalCar,
+      });
+    }
   };
+
+  if (isCheckingSession) {
+    return (
+      <SafeAreaView style={[styles.safeArea, styles.loadingScreen]}>
+        <StatusBar barStyle="light-content" backgroundColor="#DC2626" />
+        <ActivityIndicator size="large" color="#FFFFFF" />
+        <Text style={styles.loadingScreenText}>Loading Driver Dispatch...</Text>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -77,7 +161,7 @@ export default function DriverLoginScreen({ navigation }) {
           <Text style={styles.appTag}>CAB DRIVER PORTAL</Text>
           <Text style={styles.headerTitle}>Driver Login</Text>
           <Text style={styles.headerSubtitle}>
-            Select your driver profile or enter custom driver credentials
+            Native Android OkHttp WebSocket & WebRTC Voice Calling
           </Text>
         </View>
 
@@ -98,6 +182,7 @@ export default function DriverLoginScreen({ navigation }) {
                   setIsCustom(false);
                   setSelectedId(driver.id);
                 }}
+                disabled={isConnecting}
                 activeOpacity={0.8}
               >
                 <View style={styles.profileInfo}>
@@ -139,6 +224,7 @@ export default function DriverLoginScreen({ navigation }) {
           <TouchableOpacity
             style={[styles.customCard, isCustom && styles.profileCardActive]}
             onPress={() => setIsCustom(true)}
+            disabled={isConnecting}
             activeOpacity={0.8}
           >
             <View style={styles.nameRow}>
@@ -163,6 +249,7 @@ export default function DriverLoginScreen({ navigation }) {
                   value={customId}
                   onChangeText={setCustomId}
                   autoCapitalize="none"
+                  editable={!isConnecting}
                 />
 
                 <Text style={[styles.inputLabel, { marginTop: 10 }]}>
@@ -174,6 +261,7 @@ export default function DriverLoginScreen({ navigation }) {
                   placeholderTextColor="#94A3B8"
                   value={customName}
                   onChangeText={setCustomName}
+                  editable={!isConnecting}
                 />
               </View>
             )}
@@ -183,11 +271,19 @@ export default function DriverLoginScreen({ navigation }) {
         {/* Submit Button */}
         <View style={styles.footer}>
           <TouchableOpacity
-            style={styles.loginButton}
+            style={[styles.loginButton, isConnecting && styles.loginButtonDisabled]}
             onPress={() => handleLogin()}
+            disabled={isConnecting}
             activeOpacity={0.85}
           >
-            <Text style={styles.loginButtonText}>LOGIN AS DRIVER</Text>
+            {isConnecting ? (
+              <View style={styles.loadingRow}>
+                <ActivityIndicator color="#FFFFFF" size="small" />
+                <Text style={styles.loginButtonText}>CONNECTING...</Text>
+              </View>
+            ) : (
+              <Text style={styles.loginButtonText}>LOGIN AS DRIVER</Text>
+            )}
           </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>
@@ -199,6 +295,17 @@ const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
     backgroundColor: "#DC2626",
+  },
+  loadingScreen: {
+    justifyContent: "center",
+    alignItems: "center",
+    backgroundColor: "#DC2626",
+  },
+  loadingScreenText: {
+    color: "#FFFFFF",
+    fontSize: 16,
+    fontWeight: "700",
+    marginTop: 14,
   },
   container: {
     flex: 1,
@@ -379,6 +486,14 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.25,
     shadowRadius: 8,
     shadowOffset: { width: 0, height: 4 },
+  },
+  loginButtonDisabled: {
+    backgroundColor: "#F87171",
+  },
+  loadingRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
   },
   loginButtonText: {
     color: "#FFFFFF",

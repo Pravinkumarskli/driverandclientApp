@@ -21,10 +21,19 @@ const CustomerAnswerCallScreen = ({ route, navigation }) => {
       setSeconds((prev) => prev + 1);
     }, 1000);
 
+    const handleCallEnded = () => {
+      console.log("🛑 Call ended by remote party");
+      WebRTCService.close();
+      navigation.goBack();
+    };
+
+    SocketService.onCallEnded(handleCallEnded);
+
     return () => {
       clearInterval(timer);
+      SocketService.off("callEnded", handleCallEnded);
     };
-  }, []);
+  }, [navigation]);
 
   // -----------------------------
   // FORMAT DURATION

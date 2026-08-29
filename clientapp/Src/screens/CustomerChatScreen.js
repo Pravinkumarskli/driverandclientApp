@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   FlatList,
   KeyboardAvoidingView,
@@ -12,7 +12,9 @@ import {
   View,
 } from "react-native";
 
-import SocketService from "../services/SocketService";
+import NativeSocketService from "../services/NativeSocketService";
+import { loadMessages, saveMessage, updateMessageStatus } from "../services/ChatStorage";
+import { WS_URL } from "../config/AppConfig";
 
 const QUICK_REPLIES = [
   "I am at pickup point",
@@ -33,91 +35,127 @@ export default function CustomerChatScreen({ route, navigation }) {
   const listRef = useRef(null);
   const conversationId = [userId, receiverId].sort().join("_");
 
-  useEffect(() => {
-    SocketService.connect(userId);
-
-    const handleReceiveMessage = (message) => {
-      if (message.conversationId === conversationId) {
-        setMessages((current) => {
-          if (current.some((m) => m.id === message.id)) {
-            return current;
-          }
-          return [...current, message];
-        });
-      }
-    };
-
-    const handleMessageDelivered = (message) => {
-      if (message.conversationId === conversationId) {
-        setMessages((current) =>
-          current.map((m) =>
-            m.id === message.id ? { ...m, status: "delivered" } : m,
-          ),
+  // ─── Merge helper: deduplicates by messageId / id ───────────────────────
+  const mergeMessage = useCallback((incoming) => {
+    const msgId = incoming.messageId || incoming.id;
+    setMessages((prev) => {
+      const exists = prev.some(
+        (m) => (m.messageId && m.messageId === msgId) || m.id === msgId,
+      );
+      if (exists) {
+        // update status only
+        return prev.map((m) =>
+          (m.messageId === msgId || m.id === msgId)
+            ? { ...m, status: incoming.status || m.status }
+            : m,
         );
       }
-    };
+      return [...prev, { ...incoming, id: msgId }];
+    });
+  }, []);
 
-    SocketService.getMessages(userId, receiverId, (result) => {
-      if (result?.success && Array.isArray(result.messages)) {
-        setMessages(result.messages);
+  // ─── Load messages from AsyncStorage on screen open ──────────────────────
+  useEffect(() => {
+    loadMessages(conversationId).then((stored) => {
+      if (stored.length > 0) {
+        setMessages(stored);
       }
     });
+  }, [conversationId]);
 
-    SocketService.on("receiveMessage", handleReceiveMessage);
-    SocketService.on("messageDelivered", handleMessageDelivered);
+  // ─── Native socket receive message listener ───────────────────────────────
+  useEffect(() => {
+    // Service is already started from LoginScreen — just set up listeners here.
+    // Calling start() again would disrupt the existing bound connection.
+
+    const unsub = NativeSocketService.onMessage((data) => {
+      console.log("[CustomerChat] raw event received:", JSON.stringify(data).slice(0, 120));
+
+      if (data?.type === "receiveMessage" || data?.type === "chat") {
+        // Only handle messages for this conversation
+        if (
+          data.conversationId === conversationId ||
+          data.senderId === receiverId ||
+          data.receiverId === userId
+        ) {
+          const msg = { ...data, status: "delivered" };
+          mergeMessage(msg);
+          // Persist to AsyncStorage asynchronously
+          saveMessage(conversationId, msg);
+        }
+      } else if (data?.type === "messageDelivered") {
+        const deliveredId = data?.messageId || data?.id;
+        if (deliveredId) {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.messageId === deliveredId || m.id === deliveredId
+                ? { ...m, status: "delivered" }
+                : m,
+            ),
+          );
+          updateMessageStatus(conversationId, deliveredId, "delivered");
+        }
+      }
+    });
 
     return () => {
-      SocketService.off("receiveMessage", handleReceiveMessage);
-      SocketService.off("messageDelivered", handleMessageDelivered);
+      unsub();
     };
-  }, [conversationId, receiverId, userId]);
+  }, [conversationId, mergeMessage, receiverId, userId]);
 
-  const sendMessage = (customText) => {
-    const text = (customText || draft).trim();
-    if (!text) return;
-
-    const tempId = `${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
-    const newMsg = {
-      id: tempId,
-      conversationId,
-      senderId: userId,
-      receiverId,
-      message: text,
-      type: "text",
-      timestamp: Date.now(),
-      status: "sending",
-    };
-
-    setMessages((current) => [...current, newMsg]);
-    if (!customText) {
-      setDraft("");
+  // ─── Auto-scroll on new messages ─────────────────────────────────────────
+  useEffect(() => {
+    if (messages.length > 0) {
+      setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 100);
     }
+  }, [messages.length]);
 
-    SocketService.sendMessage(newMsg, (result) => {
-      if (result?.success && result.message) {
-        setMessages((current) =>
-          current.map((m) => (m.id === tempId ? result.message : m)),
-        );
-      }
-    });
-  };
+  // ─── Send message ─────────────────────────────────────────────────────────
+  const sendMessage = useCallback(
+    (customText) => {
+      const text = (customText || draft).trim();
+      if (!text) return;
 
-  const openCall = () => {
-    navigation.navigate("CustomerCallScreen", {
-      userId,
-      receiverId,
-      receiverName: receiverName || "Driver",
-    });
-  };
+      const tempId = `${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+      const newMsg = {
+        id: tempId,
+        messageId: tempId,
+        conversationId,
+        senderId: userId,
+        receiverId,
+        senderType: "client",
+        receiverType: "driver",
+        message: text,
+        type: "text",
+        messageType: "text",
+        timestamp: Date.now(),
+        status: "sending",
+      };
 
-  const openTracking = () => {
-    navigation.navigate("CustomerTracking", {
-      customerId: userId,
-      driverId: receiverId,
-      driverName: receiverName || "Driver",
-    });
-  };
+      // Add to UI immediately
+      setMessages((prev) => [...prev, newMsg]);
+      if (!customText) setDraft("");
 
+      // Save to local storage immediately
+      saveMessage(conversationId, newMsg);
+
+      // Send via native OkHttp WebSocket
+      NativeSocketService.sendMessage(newMsg).then((sent) => {
+        console.log(`[CustomerChat] sendMessage native sent=${sent} id=${tempId}`);
+        if (sent) {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === tempId ? { ...m, status: "sent" } : m,
+            ),
+          );
+          updateMessageStatus(conversationId, tempId, "sent");
+        }
+      });
+    },
+    [conversationId, draft, receiverId, userId],
+  );
+
+  // ─── Render single message bubble ────────────────────────────────────────
   const renderMessage = ({ item }) => {
     const isMine = item.senderId === userId;
     const timeString = new Date(item.timestamp).toLocaleTimeString([], {
@@ -126,28 +164,20 @@ export default function CustomerChatScreen({ route, navigation }) {
     });
 
     return (
-      <View
-        style={[
-          styles.messageRow,
-          isMine ? styles.mineRow : styles.otherRow,
-        ]}
-      >
-        <View
-          style={[
-            styles.bubble,
-            isMine ? styles.mineBubble : styles.otherBubble,
-          ]}
-        >
+      <View style={[styles.messageRow, isMine ? styles.mineRow : styles.otherRow]}>
+        <View style={[styles.bubble, isMine ? styles.mineBubble : styles.otherBubble]}>
           <Text style={[styles.messageText, isMine && styles.mineText]}>
             {item.message}
           </Text>
           <View style={styles.bubbleFooter}>
-            <Text style={[styles.time, isMine && styles.mineTime]}>
-              {timeString}
-            </Text>
+            <Text style={[styles.time, isMine && styles.mineTime]}>{timeString}</Text>
             {isMine && (
               <Text style={styles.statusText}>
-                {item.status === "delivered" ? "Delivered" : "Sent"}
+                {item.status === "delivered"
+                  ? "✓✓ Delivered"
+                  : item.status === "sent"
+                  ? "✓ Sent"
+                  : "Sending..."}
               </Text>
             )}
           </View>
@@ -163,7 +193,7 @@ export default function CustomerChatScreen({ route, navigation }) {
         style={styles.container}
         behavior={Platform.OS === "ios" ? "padding" : undefined}
       >
-        {/* Chat Header (Text-Only) */}
+        {/* Header */}
         <View style={styles.header}>
           <TouchableOpacity
             onPress={() => navigation.goBack()}
@@ -172,27 +202,35 @@ export default function CustomerChatScreen({ route, navigation }) {
           >
             <Text style={styles.backText}>BACK</Text>
           </TouchableOpacity>
-
           <View style={styles.headerInfo}>
             <Text style={styles.headerName} numberOfLines={1}>
               {receiverName}
             </Text>
             <Text style={styles.headerStatus}>ONLINE • ACTIVE DRIVER</Text>
           </View>
-
-          {/* Quick Header Text Action Buttons */}
           <View style={styles.headerActions}>
             <TouchableOpacity
               style={[styles.headerActionBtn, styles.headerTrackBtn]}
-              onPress={openTracking}
+              onPress={() =>
+                navigation.navigate("CustomerTracking", {
+                  customerId: userId,
+                  driverId: receiverId,
+                  driverName: receiverName || "Driver",
+                })
+              }
               activeOpacity={0.7}
             >
               <Text style={styles.headerTrackBtnText}>TRACK</Text>
             </TouchableOpacity>
-
             <TouchableOpacity
               style={[styles.headerActionBtn, styles.headerCallBtn]}
-              onPress={openCall}
+              onPress={() =>
+                navigation.navigate("CustomerCallScreen", {
+                  userId,
+                  receiverId,
+                  receiverName: receiverName || "Driver",
+                })
+              }
               activeOpacity={0.7}
             >
               <Text style={styles.headerCallBtnText}>CALL</Text>
@@ -204,15 +242,13 @@ export default function CustomerChatScreen({ route, navigation }) {
         <FlatList
           ref={listRef}
           data={messages}
-          keyExtractor={(item) => item.id}
+          keyExtractor={(item) => item.id || item.messageId || String(item.timestamp)}
           renderItem={renderMessage}
           contentContainerStyle={styles.messageList}
-          onContentSizeChange={() =>
-            listRef.current?.scrollToEnd({ animated: true })
-          }
+          onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}
           ListEmptyComponent={
             <View style={styles.emptyContainer}>
-              <Text style={styles.emptyTitle}>Chat with Driver</Text>
+              <Text style={styles.emptyTitle}>Chat with {receiverName}</Text>
               <Text style={styles.emptySub}>
                 Coordinate pickup location or arrival status directly.
               </Text>
@@ -240,7 +276,7 @@ export default function CustomerChatScreen({ route, navigation }) {
           />
         </View>
 
-        {/* Input Composer (Text-Only) */}
+        {/* Input Composer */}
         <View style={styles.composer}>
           <TextInput
             value={draft}
@@ -267,14 +303,8 @@ export default function CustomerChatScreen({ route, navigation }) {
 }
 
 const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-    backgroundColor: "#FFFFFF",
-  },
-  container: {
-    flex: 1,
-    backgroundColor: "#F8FAFC",
-  },
+  safeArea: { flex: 1, backgroundColor: "#FFFFFF" },
+  container: { flex: 1, backgroundColor: "#F8FAFC" },
   header: {
     height: 64,
     backgroundColor: "#FFFFFF",
@@ -291,70 +321,20 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     marginRight: 10,
   },
-  backText: {
-    fontSize: 11,
-    fontWeight: "800",
-    color: "#0F172A",
-    letterSpacing: 0.5,
-  },
-  headerInfo: {
-    flex: 1,
-  },
-  headerName: {
-    color: "#0F172A",
-    fontSize: 15,
-    fontWeight: "800",
-  },
-  headerStatus: {
-    color: "#059669",
-    fontSize: 10,
-    fontWeight: "800",
-    letterSpacing: 0.5,
-    marginTop: 1,
-  },
-  headerActions: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-  },
-  headerActionBtn: {
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-    borderRadius: 8,
-  },
-  headerTrackBtn: {
-    backgroundColor: "#ECFDF5",
-  },
-  headerTrackBtnText: {
-    color: "#059669",
-    fontSize: 11,
-    fontWeight: "800",
-    letterSpacing: 0.5,
-  },
-  headerCallBtn: {
-    backgroundColor: "#EFF6FF",
-  },
-  headerCallBtnText: {
-    color: "#2563EB",
-    fontSize: 11,
-    fontWeight: "800",
-    letterSpacing: 0.5,
-  },
-  messageList: {
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    flexGrow: 1,
-  },
-  messageRow: {
-    marginVertical: 4,
-    flexDirection: "row",
-  },
-  mineRow: {
-    justifyContent: "flex-end",
-  },
-  otherRow: {
-    justifyContent: "flex-start",
-  },
+  backText: { fontSize: 11, fontWeight: "800", color: "#0F172A", letterSpacing: 0.5 },
+  headerInfo: { flex: 1 },
+  headerName: { color: "#0F172A", fontSize: 15, fontWeight: "800" },
+  headerStatus: { color: "#059669", fontSize: 10, fontWeight: "800", letterSpacing: 0.5, marginTop: 1 },
+  headerActions: { flexDirection: "row", alignItems: "center", gap: 6 },
+  headerActionBtn: { paddingVertical: 6, paddingHorizontal: 10, borderRadius: 8 },
+  headerTrackBtn: { backgroundColor: "#ECFDF5" },
+  headerTrackBtnText: { color: "#059669", fontSize: 11, fontWeight: "800", letterSpacing: 0.5 },
+  headerCallBtn: { backgroundColor: "#EFF6FF" },
+  headerCallBtnText: { color: "#2563EB", fontSize: 11, fontWeight: "800", letterSpacing: 0.5 },
+  messageList: { paddingHorizontal: 16, paddingVertical: 14, flexGrow: 1 },
+  messageRow: { marginVertical: 4, flexDirection: "row" },
+  mineRow: { justifyContent: "flex-end" },
+  otherRow: { justifyContent: "flex-start" },
   bubble: {
     maxWidth: "80%",
     paddingHorizontal: 14,
@@ -366,24 +346,15 @@ const styles = StyleSheet.create({
     shadowRadius: 3,
     shadowOffset: { width: 0, height: 1 },
   },
-  mineBubble: {
-    backgroundColor: "#2563EB",
-    borderBottomRightRadius: 4,
-  },
+  mineBubble: { backgroundColor: "#2563EB", borderBottomRightRadius: 4 },
   otherBubble: {
     backgroundColor: "#FFFFFF",
     borderBottomLeftRadius: 4,
     borderWidth: 1,
     borderColor: "#E2E8F0",
   },
-  messageText: {
-    color: "#0F172A",
-    fontSize: 14,
-    lineHeight: 19,
-  },
-  mineText: {
-    color: "#FFFFFF",
-  },
+  messageText: { color: "#0F172A", fontSize: 14, lineHeight: 19 },
+  mineText: { color: "#FFFFFF" },
   bubbleFooter: {
     flexDirection: "row",
     justifyContent: "flex-end",
@@ -391,29 +362,11 @@ const styles = StyleSheet.create({
     marginTop: 4,
     gap: 6,
   },
-  time: {
-    color: "#64748B",
-    fontSize: 10,
-    fontWeight: "500",
-  },
-  mineTime: {
-    color: "#BFDBFE",
-  },
-  statusText: {
-    color: "#BFDBFE",
-    fontSize: 10,
-    fontWeight: "700",
-  },
-  emptyContainer: {
-    alignItems: "center",
-    justifyContent: "center",
-    paddingTop: 60,
-  },
-  emptyTitle: {
-    color: "#0F172A",
-    fontSize: 17,
-    fontWeight: "800",
-  },
+  time: { color: "#64748B", fontSize: 10, fontWeight: "500" },
+  mineTime: { color: "#BFDBFE" },
+  statusText: { color: "#BFDBFE", fontSize: 10, fontWeight: "700" },
+  emptyContainer: { alignItems: "center", justifyContent: "center", paddingTop: 60 },
+  emptyTitle: { color: "#0F172A", fontSize: 17, fontWeight: "800" },
   emptySub: {
     color: "#64748B",
     fontSize: 13,
@@ -422,14 +375,8 @@ const styles = StyleSheet.create({
     maxWidth: 240,
     lineHeight: 18,
   },
-  quickRepliesContainer: {
-    backgroundColor: "#F8FAFC",
-    paddingVertical: 8,
-  },
-  quickRepliesList: {
-    paddingHorizontal: 14,
-    gap: 8,
-  },
+  quickRepliesContainer: { backgroundColor: "#F8FAFC", paddingVertical: 8 },
+  quickRepliesList: { paddingHorizontal: 14, gap: 8 },
   quickChip: {
     backgroundColor: "#FFFFFF",
     paddingHorizontal: 12,
@@ -438,11 +385,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#CBD5E1",
   },
-  quickChipText: {
-    color: "#0F172A",
-    fontSize: 11,
-    fontWeight: "700",
-  },
+  quickChipText: { color: "#0F172A", fontSize: 11, fontWeight: "700" },
   composer: {
     flexDirection: "row",
     alignItems: "center",
@@ -472,13 +415,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  sendButtonActive: {
-    backgroundColor: "#2563EB",
-  },
-  sendText: {
-    color: "#FFFFFF",
-    fontSize: 12,
-    fontWeight: "800",
-    letterSpacing: 0.8,
-  },
+  sendButtonActive: { backgroundColor: "#2563EB" },
+  sendText: { color: "#FFFFFF", fontSize: 12, fontWeight: "800", letterSpacing: 0.8 },
 });

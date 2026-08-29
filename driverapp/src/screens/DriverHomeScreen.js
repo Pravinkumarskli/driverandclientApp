@@ -10,6 +10,9 @@ import {
 } from "react-native";
 
 import SocketService from "../services/SocketService";
+import NativeSocketService from "../services/NativeSocketService";
+import { clearDriverSession } from "../services/AuthSession";
+
 
 export default function DriverHomeScreen({ route, navigation }) {
   const {
@@ -32,6 +35,32 @@ export default function DriverHomeScreen({ route, navigation }) {
   useEffect(() => {
     SocketService.connect(driverId);
 
+    // The foreground socket service is started once during login. Starting it
+    // again here can crash some Android devices when the service is rebinding.
+    NativeSocketService.getInitialNotificationData()
+      .then((data) => {
+        if (data?.senderId) {
+          navigation.navigate("DriverChat", {
+            userId: driverId,
+            receiverId: data.senderId,
+            receiverName: data.receiverName || "Customer",
+            messageId: data.messageId || "",
+          });
+        }
+      })
+      .catch((error) => console.warn("Notification launch data unavailable:", error));
+
+    const unsubscribeNotification = NativeSocketService.onNotificationOpened((data) => {
+      if (data?.senderId) {
+        navigation.navigate("DriverChat", {
+          userId: driverId,
+          receiverId: data.senderId,
+          receiverName: data.receiverName || "Customer",
+          messageId: data.messageId || "",
+        });
+      }
+    });
+
     const handleIncomingCall = (data) => {
       navigation.navigate("IncomingCall", {
         callerId: data.senderId || data.callerId,
@@ -45,6 +74,7 @@ export default function DriverHomeScreen({ route, navigation }) {
 
     return () => {
       SocketService.off("incomingCall", handleIncomingCall);
+      unsubscribeNotification();
     };
   }, [driverId, navigation]);
 
@@ -76,7 +106,10 @@ export default function DriverHomeScreen({ route, navigation }) {
     });
   };
 
-  const handleSwitchDriver = () => {
+  const handleSwitchDriver = async () => {
+    await clearDriverSession();
+    NativeSocketService.stop();
+    SocketService.disconnect();
     navigation.replace("DriverLogin");
   };
 

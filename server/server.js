@@ -1,422 +1,517 @@
-const express = require("express");
-const http = require("http");
-const cors = require("cors");
-const { Server } = require("socket.io");
+const express = require('express');
+const http = require('http');
+const cors = require('cors');
+const { Server: SocketIOServer } = require('socket.io');
+const WebSocket = require('ws');
 
 const app = express();
-
 app.use(cors());
 app.use(express.json());
 
 const server = http.createServer(app);
 
-const io = new Server(server, {
-  cors: {
-    origin: "*",
-  },
+// Initialize Socket.io Server
+const io = new SocketIOServer(server, {
+  cors: { origin: '*', methods: ['GET', 'POST'] },
 });
 
-const customers = [
-  {
-    id: "customer_101",
-    name: "Customer 101",
-    phone: "+91 98765 43210",
-  },
-  {
-    id: "customer_102",
-    name: "Customer 102",
-    phone: "+91 98765 43211",
-  },
-];
+// Initialize Native WebSocket Server (handles Android OkHttp connections)
+const wss = new WebSocket.Server({ noServer: true });
 
-const drivers = [
-  {
-    id: "driver_201",
-    name: "Arun",
-    car: "Prime Sedan (TN 01 AB 1234)",
-    phone: "+91 98765 11201",
-    rating: 4.8,
-  },
-  {
-    id: "driver_202",
-    name: "Kumar",
-    car: "Mini Hatchback (TN 01 CD 5678)",
-    phone: "+91 98765 11202",
-    rating: 4.7,
-  },
-  {
-    id: "driver_203",
-    name: "Ravi",
-    car: "Auto Rickshaw (TN 01 EF 9012)",
-    phone: "+91 98765 11203",
-    rating: 4.9,
-  },
-];
-
-// Map of userId -> Set of socket.id
-const connectedUsers = new Map();
-
-function addUserSocket(userId, socketId) {
-  if (!connectedUsers.has(userId)) {
-    connectedUsers.set(userId, new Set());
-  }
-  connectedUsers.get(userId).add(socketId);
-}
-
-function removeUserSocket(userId, socketId) {
-  if (connectedUsers.has(userId)) {
-    const set = connectedUsers.get(userId);
-    set.delete(socketId);
-    if (set.size === 0) {
-      connectedUsers.delete(userId);
-    }
-  }
-}
-
-function emitToUser(userId, event, data) {
-  if (connectedUsers.has(userId)) {
-    const socketIds = connectedUsers.get(userId);
-    for (const socketId of socketIds) {
-      io.to(socketId).emit(event, data);
-    }
-    return true;
-  }
-  return false;
-}
-
-function isUserOnline(userId) {
-  return connectedUsers.has(userId) && connectedUsers.get(userId).size > 0;
-}
-
-// Map of driverId -> last known location
-const driverLocations = new Map();
-
-driverLocations.set("driver_201", {
-  driverId: "driver_201",
-  latitude: 12.0125,
-  longitude: 79.855,
-  accuracy: 5,
-  speed: 35,
-  heading: 90,
-  timestamp: Date.now(),
-});
-
-// Map of customerId -> driverId tracking relationship
-const activeTracking = new Map();
-
-// In-memory conversation store: conversationId -> array of messages
-const conversations = new Map();
-
-const getConversationId = (firstUserId, secondUserId) =>
-  [firstUserId, secondUserId].sort().join("_");
-
-function broadcastUserLists() {
-  const driverList = drivers.map((driver) => ({
-    ...driver,
-    online: isUserOnline(driver.id),
-  }));
-
-  const customerList = customers.map((customer) => ({
-    ...customer,
-    online: isUserOnline(customer.id),
-  }));
-
-  io.emit("driverList", driverList);
-  io.emit("customerList", customerList);
-}
-
-// REST endpoints
-app.get("/api/health", (req, res) => {
-  res.json({
-    status: "ok",
-    connectedUsersCount: connectedUsers.size,
-    activeTrackingCount: activeTracking.size,
+// Handle upgrade for Native WebSocket vs Socket.io
+server.on('upgrade', (request, socket, head) => {
+  const pathname = request.url;
+  if (pathname && pathname.startsWith('/socket.io')) return;
+  wss.handleUpgrade(request, socket, head, (ws) => {
+    wss.emit('connection', ws, request);
   });
 });
 
-app.get("/api/driver/:driverId/location", (req, res) => {
-  const { driverId } = req.params;
-  const location = driverLocations.get(driverId);
+// ─────────────────────────────────────────────────────────────
+// STATE MANAGEMENT
+// ─────────────────────────────────────────────────────────────
+const nativeSockets   = new Map(); // userId -> Set<WebSocket>
+const socketIoSockets = new Map(); // userId -> Set<socketId>
+const userRegistry    = new Map(); // userId -> { userId, userType, name, online, loginTime }
+const conversationHistory = new Map(); // conversationId -> Message[]
+const activeTracking  = new Map(); // customerId -> driverId
+const driverLocations = new Map(); // driverId -> location
 
-  if (!location) {
-    return res.status(404).json({
-      success: false,
-      message: "Driver location not available",
-    });
-  }
+function getConversationId(id1, id2) {
+  return [id1, id2].sort().join('_');
+}
 
-  res.json({
-    success: true,
-    driverId,
-    location,
-  });
-});
+function getUserLabel(userId) {
+  const info = userRegistry.get(userId);
+  if (!info) return userId;
+  const name = info.name ? ` (${info.name})` : '';
+  return `${userId}${name} [${info.userType || '?'}]`;
+}
 
-// Socket.io connection handling
-io.on("connection", (socket) => {
-  console.log("🔌 SOCKET CONNECTED:", socket.id);
+function now() {
+  return new Date().toISOString();
+}
 
-  // ------------------------------------------
-  // REGISTRATION
-  // ------------------------------------------
-  socket.on("register", (userId, ack) => {
-    if (!userId) return;
+// ─────────────────────────────────────────────────────────────
+// UNIFIED EMIT HELPER (NATIVE WS + SOCKET.IO)
+// ─────────────────────────────────────────────────────────────
+function emitToUser(userId, eventName, data) {
+  let delivered = false;
 
-    addUserSocket(userId, socket.id);
-    socket.userId = userId;
+  if (!userId) return false;
 
-    console.log(`👤 USER REGISTERED: ${userId} (Socket: ${socket.id})`);
-    broadcastUserLists();
-    ack?.({ success: true, userId, socketId: socket.id });
-  });
-
-  // ------------------------------------------
-  // CHAT / MESSAGING (DRIVER <-> CLIENT)
-  // ------------------------------------------
-  socket.on("sendMessage", (data, acknowledge) => {
-    console.log("💬 SEND MESSAGE:", data);
-
-    const senderId = data?.senderId || socket.userId;
-    const receiverId = data?.receiverId;
-    const text = typeof data?.message === "string" ? data.message.trim() : "";
-
-    if (!senderId || !receiverId || !text) {
-      console.log("❌ INVALID MESSAGE DATA:", data);
-      acknowledge?.({ success: false, message: "Invalid message parameters" });
-      return;
-    }
-
-    if (!socket.userId) {
-      socket.userId = senderId;
-      addUserSocket(senderId, socket.id);
-    }
-
-    const conversationId = getConversationId(senderId, receiverId);
-    const messageObj = {
-      id: data.id || `${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
-      conversationId,
-      senderId,
-      receiverId,
-      message: text,
-      type: data.type || "text",
-      timestamp: data.timestamp || Date.now(),
-      status: "sent",
-    };
-
-    const history = conversations.get(conversationId) || [];
-    history.push(messageObj);
-    conversations.set(conversationId, history);
-
-    // Deliver to all active sockets of receiver
-    const delivered = emitToUser(receiverId, "receiveMessage", messageObj);
-    if (delivered) {
-      console.log(`📨 DELIVERED MESSAGE TO ${receiverId}`);
-      messageObj.status = "delivered";
-    } else {
-      console.log(`⚠️ RECEIVER OFFLINE: ${receiverId}`);
-    }
-
-    // Also broadcast to other active sockets of sender (e.g. multi-device sync)
-    if (connectedUsers.has(senderId)) {
-      for (const sId of connectedUsers.get(senderId)) {
-        if (sId !== socket.id) {
-          io.to(sId).emit("receiveMessage", messageObj);
+  // 1. Native Android WebSocket connections
+  if (nativeSockets.has(userId)) {
+    const wsSet = nativeSockets.get(userId);
+    const payload = JSON.stringify({ ...data, type: eventName });
+    for (const ws of wsSet) {
+      if (ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(payload);
+          delivered = true;
+        } catch (e) {
+          console.error(`   ❌ Error sending to native WS for ${userId}:`, e.message);
         }
       }
     }
+  }
 
-    socket.emit("messageDelivered", messageObj);
-    acknowledge?.({ success: true, message: messageObj });
+  // 2. Socket.io connections
+  if (socketIoSockets.has(userId)) {
+    const sIdSet = socketIoSockets.get(userId);
+    for (const sId of sIdSet) {
+      io.to(sId).emit(eventName, data);
+      delivered = true;
+    }
+  }
+
+  return delivered;
+}
+
+// ─────────────────────────────────────────────────────────────
+// 1. NATIVE ANDROID WEBSOCKET HANDLER
+// ─────────────────────────────────────────────────────────────
+let socketSeq = 1;
+
+wss.on('connection', (ws, req) => {
+  const socketId   = `ws_${socketSeq++}_${Date.now().toString(36)}`;
+  const remoteIp   = req.socket.remoteAddress || req.headers['x-forwarded-for'] || 'unknown';
+  const connectedAt = now();
+
+  let authUserId   = null;
+  let authUserType = 'unknown';
+  let authUserName = '';
+
+  console.log(`\n${'═'.repeat(58)}`);
+  console.log(`⚡  NEW NATIVE WS CONNECTION`);
+  console.log(`   Socket    : ${socketId}`);
+  console.log(`   IP        : ${remoteIp}`);
+  console.log(`   Time      : ${connectedAt}`);
+  console.log(`   Total     : ${wss.clients.size} connected`);
+  console.log(`${'═'.repeat(58)}\n`);
+
+  ws.on('message', (buffer) => {
+    try {
+      const data = JSON.parse(buffer.toString());
+      const { type } = data;
+
+      // ── REGISTER ──────────────────────────────────────────
+      if (type === 'register') {
+        authUserId   = data.userId;
+        authUserType = data.userType || 'unknown';
+        authUserName = data.userName || data.name || '';
+
+        if (!nativeSockets.has(authUserId)) {
+          nativeSockets.set(authUserId, new Set());
+        }
+        nativeSockets.get(authUserId).add(ws);
+
+        userRegistry.set(authUserId, {
+          userId:    authUserId,
+          userType:  authUserType,
+          name:      authUserName,
+          online:    true,
+          loginTime: now(),
+        });
+
+        const socketCount = nativeSockets.get(authUserId).size;
+        const totalOnline = nativeSockets.size;
+
+        console.log(`\n🟢 LOGIN  ─── ${authUserType.toUpperCase()} LOGGED IN ───────────────────`);
+        console.log(`   User ID   : ${authUserId}`);
+        if (authUserName) console.log(`   Name      : ${authUserName}`);
+        console.log(`   Socket    : ${socketId}`);
+        console.log(`   Sockets   : ${socketCount} (this user) | ${totalOnline} unique users online`);
+        console.log(`   Time      : ${now()}`);
+        console.log(`${'─'.repeat(58)}\n`);
+
+        ws.send(JSON.stringify({
+          type:      'registerSuccess',
+          userId:    authUserId,
+          userType:  authUserType,
+          timestamp: Date.now(),
+        }));
+        return;
+      }
+
+      // ── PING / PONG ───────────────────────────────────────
+      if (type === 'ping') {
+        ws.send(JSON.stringify({ type: 'pong', timestamp: Date.now() }));
+        return;
+      }
+
+      // ── SEND MESSAGE ──────────────────────────────────────
+      if (type === 'sendMessage') {
+        const {
+          messageId   = `${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+          senderId    = authUserId,
+          receiverId,
+          senderType  = authUserType,
+          receiverType = (senderType === 'client' ? 'driver' : 'client'),
+          message,
+          messageType = 'text',
+        } = data;
+
+        if (!senderId || !receiverId || !message) {
+          ws.send(JSON.stringify({ type: 'error', message: 'Missing senderId, receiverId, or message' }));
+          return;
+        }
+
+        const conversationId = getConversationId(senderId, receiverId);
+        const messageObject = {
+          id:           messageId,
+          messageId,
+          conversationId,
+          senderId,
+          receiverId,
+          senderType,
+          receiverType,
+          message:      message.trim(),
+          type:         'receiveMessage',
+          messageType,
+          timestamp:    data.timestamp || Date.now(),
+          status:       'delivered',
+        };
+
+        // Store in-memory history
+        if (!conversationHistory.has(conversationId)) {
+          conversationHistory.set(conversationId, []);
+        }
+        conversationHistory.get(conversationId).push(messageObject);
+
+        // Deliver to receiver
+        const isDelivered = emitToUser(receiverId, 'receiveMessage', messageObject);
+
+        const senderInfo   = getUserLabel(senderId);
+        const receiverInfo = getUserLabel(receiverId);
+
+        console.log(`\n💬 MESSAGE ────────────────────────────────────────────`);
+        console.log(`   FROM      : ${senderInfo}`);
+        console.log(`   TO        : ${receiverInfo}`);
+        console.log(`   Msg ID    : ${messageId}`);
+        console.log(`   Text      : "${messageObject.message}"`);
+        console.log(`   Delivered : ${isDelivered ? '✅ Yes' : '❌ No (offline/not connected)'}`);
+        console.log(`   Time      : ${now()}`);
+        console.log(`${'─'.repeat(58)}\n`);
+
+        // Delivery ACK back to sender
+        ws.send(JSON.stringify({
+          type:         'messageDelivered',
+          messageId,
+          conversationId,
+          status:       isDelivered ? 'delivered' : 'sent',
+          timestamp:    Date.now(),
+          message:      messageObject,
+        }));
+        return;
+      }
+
+      // ── GPS LOCATION ──────────────────────────────────────
+      if (type === 'sendLocation' || type === 'driverLocation') {
+        const driverId = data.driverId || authUserId;
+        const loc = {
+          driverId,
+          latitude:  Number(data.latitude),
+          longitude: Number(data.longitude),
+          accuracy:  Number(data.accuracy || 5),
+          speed:     Number(data.speed || 0),
+          heading:   Number(data.heading || 0),
+          timestamp: data.timestamp || Date.now(),
+        };
+        driverLocations.set(driverId, loc);
+        for (const [customerId, trackedDriverId] of activeTracking.entries()) {
+          if (trackedDriverId === driverId) {
+            emitToUser(customerId, 'driverLocationUpdate', loc);
+          }
+        }
+        return;
+      }
+
+    } catch (e) {
+      console.error(`❌ [Native WS] Error processing message on ${socketId}:`, e.message);
+    }
   });
 
-  socket.on("getMessages", (data, acknowledge) => {
-    const { userId, receiverId } = data || {};
-    const sender = userId || socket.userId;
+  ws.on('close', (code, reason) => {
+    const reasonText = reason ? reason.toString() : '';
+    if (authUserId && nativeSockets.has(authUserId)) {
+      const set = nativeSockets.get(authUserId);
+      set.delete(ws);
+      if (set.size === 0) {
+        nativeSockets.delete(authUserId);
+        const user = userRegistry.get(authUserId);
+        if (user) user.online = false;
+      }
+      console.log(`\n🔴 DISCONNECT ─── ${authUserType.toUpperCase()} LEFT ───────────────────`);
+      console.log(`   User ID   : ${authUserId}`);
+      if (authUserName) console.log(`   Name      : ${authUserName}`);
+      console.log(`   Socket    : ${socketId}`);
+      console.log(`   Code      : ${code}  Reason: ${reasonText || 'Normal closure'}`);
+      console.log(`   Time      : ${now()}`);
+      console.log(`   Remaining : ${wss.clients.size} native WS connection(s)`);
+      console.log(`${'─'.repeat(58)}\n`);
+    } else {
+      console.log(`🔴 [Native WS] Unregistered socket ${socketId} closed (code: ${code})`);
+    }
+  });
 
-    if (!sender || !receiverId) {
-      acknowledge?.({ success: false, messages: [] });
+  ws.on('error', (err) => {
+    console.error(`❌ [Native WS] Socket ${socketId} | User: ${authUserId || 'unregistered'} | ${err.message}`);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// 2. SOCKET.IO HANDLER (FOR REACT NATIVE WEBRTC CALLING & GPS)
+// ─────────────────────────────────────────────────────────────
+io.on('connection', (socket) => {
+  let socketUserId = null;
+  let socketUserType = 'unknown';
+
+  socket.on('register', (data, callback) => {
+    const userId   = typeof data === 'string' ? data : data?.userId;
+    const userType = typeof data === 'object' ? data.userType : 'unknown';
+    const userName = typeof data === 'object' ? (data.userName || data.name || '') : '';
+    if (!userId) return;
+
+    socketUserId   = userId;
+    socketUserType = userType;
+
+    if (!socketIoSockets.has(userId)) socketIoSockets.set(userId, new Set());
+    socketIoSockets.get(userId).add(socket.id);
+
+    userRegistry.set(userId, { userId, userType, name: userName, online: true, loginTime: now() });
+
+    console.log(`\n🟢 LOGIN  ─── ${userType.toUpperCase()} LOGGED IN (Socket.io) ──────────`);
+    console.log(`   User ID   : ${userId}`);
+    if (userName) console.log(`   Name      : ${userName}`);
+    console.log(`   Socket.io : ${socket.id}`);
+    console.log(`   Time      : ${now()}`);
+    console.log(`${'─'.repeat(58)}\n`);
+
+    if (typeof callback === 'function') callback({ success: true, userId, socketId: socket.id });
+  });
+
+  socket.on('sendMessage', (data, callback) => {
+    const senderId   = data.senderId || socketUserId;
+    const receiverId = data.receiverId;
+    const messageText = data.message;
+    const messageId  = data.id || data.messageId || `${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+
+    if (!senderId || !receiverId || !messageText) {
+      if (typeof callback === 'function') callback({ success: false, error: 'Invalid message' });
       return;
     }
 
-    const conversationId = getConversationId(sender, receiverId);
-    const messages = conversations.get(conversationId) || [];
-    console.log(
-      `📜 GET MESSAGES for ${conversationId}: ${messages.length} messages`,
-    );
-
-    acknowledge?.({
-      success: true,
+    const conversationId = getConversationId(senderId, receiverId);
+    const messageObject = {
+      id:           messageId,
+      messageId,
       conversationId,
-      messages,
-    });
-  });
-
-  // ------------------------------------------
-  // GPS TRACKING
-  // ------------------------------------------
-  socket.on("startTracking", (data) => {
-    const { customerId, driverId } = data || {};
-    console.log(
-      `📍 START TRACKING: Customer ${customerId} -> Driver ${driverId}`,
-    );
-
-    if (!customerId || !driverId) return;
-
-    activeTracking.set(customerId, driverId);
-
-    // Notify driver
-    emitToUser(driverId, "trackingStarted", { customerId, driverId });
-
-    // Send last location immediately
-    const lastLocation = driverLocations.get(driverId);
-    if (lastLocation) {
-      socket.emit("driverLocationUpdate", lastLocation);
-      console.log("📍 SENT LAST LOCATION TO CUSTOMER:", lastLocation);
-    }
-  });
-
-  socket.on("driverLocation", (data) => {
-    const {
-      driverId,
-      latitude,
-      longitude,
-      accuracy,
-      speed,
-      heading,
-      timestamp,
-    } = data || {};
-
-    if (!driverId || latitude === undefined || longitude === undefined) {
-      return;
-    }
-
-    const location = {
-      driverId,
-      latitude: Number(latitude),
-      longitude: Number(longitude),
-      accuracy: accuracy !== undefined ? Number(accuracy) : 5,
-      speed: speed !== undefined ? Number(speed) : 0,
-      heading: heading !== undefined ? Number(heading) : 0,
-      timestamp: timestamp || Date.now(),
+      senderId,
+      receiverId,
+      senderType:   data.senderType || socketUserType,
+      receiverType: data.receiverType || (socketUserType === 'client' ? 'driver' : 'client'),
+      message:      messageText,
+      type:         'receiveMessage',
+      timestamp:    data.timestamp || Date.now(),
+      status:       'delivered',
     };
 
-    driverLocations.set(driverId, location);
+    if (!conversationHistory.has(conversationId)) conversationHistory.set(conversationId, []);
+    conversationHistory.get(conversationId).push(messageObject);
 
-    // Broadcast to all customers actively tracking this driver
-    for (const [customerId, trackingDriverId] of activeTracking.entries()) {
-      if (trackingDriverId === driverId) {
-        emitToUser(customerId, "driverLocationUpdate", location);
-      }
+    const isDelivered = emitToUser(receiverId, 'receiveMessage', messageObject);
+
+    console.log(`\n💬 MESSAGE (Socket.io) ──────────────────────────────────`);
+    console.log(`   FROM      : ${getUserLabel(senderId)}`);
+    console.log(`   TO        : ${getUserLabel(receiverId)}`);
+    console.log(`   Text      : "${messageText.trim()}"`);
+    console.log(`   Delivered : ${isDelivered ? '✅ Yes' : '❌ No'}`);
+    console.log(`   Time      : ${now()}`);
+    console.log(`${'─'.repeat(58)}\n`);
+
+    if (typeof callback === 'function') {
+      callback({ success: true, message: { ...messageObject, status: isDelivered ? 'delivered' : 'sent' } });
     }
   });
 
-  socket.on("stopTracking", (data) => {
-    const { customerId } = data || {};
-    if (!customerId) return;
-
-    const driverId = activeTracking.get(customerId);
-    activeTracking.delete(customerId);
-    console.log(`⏹️ STOPPED TRACKING: ${customerId} -> ${driverId}`);
-
-    if (driverId) {
-      emitToUser(driverId, "trackingStopped", { customerId, driverId });
-    }
-  });
-
-  // ------------------------------------------
-  // VOICE CALLING / WEBRTC SIGNALING
-  // ------------------------------------------
-  socket.on("callUser", (data) => {
-    const senderId = data.senderId || data.callerId || socket.userId;
-    const receiverId = data.receiverId;
-    const senderName =
-      data.senderName ||
-      data.callerName ||
-      (senderId?.startsWith("customer_") ? "Customer" : "Driver");
-    const offer = data.offer;
-    const callType = data.callType || "voice";
-
-    console.log(`📞 CALL USER: ${senderId} -> ${receiverId}`);
-
-    if (!isUserOnline(receiverId)) {
-      console.log(`❌ RECEIVER NOT ONLINE FOR CALL: ${receiverId}`);
-      socket.emit("callFailed", { message: "User is offline" });
+  socket.on('getMessages', (data, callback) => {
+    const { userId } = data || {};
+    const otherUserId = data?.otherUserId || data?.receiverId;
+    if (!userId || !otherUserId) {
+      if (typeof callback === 'function') callback({ success: false, messages: [] });
       return;
     }
+    const conversationId = getConversationId(userId, otherUserId);
+    const msgs = conversationHistory.get(conversationId) || [];
+    if (typeof callback === 'function') callback({ success: true, conversationId, messages: msgs });
+  });
 
-    emitToUser(receiverId, "incomingCall", {
-      callerId: senderId,
-      callerName: senderName,
-      senderId,
-      senderName,
+  socket.on('startTracking', (data) => {
+    const { customerId, driverId } = data || {};
+    if (!customerId || !driverId) return;
+    activeTracking.set(customerId, driverId);
+    const lastLoc = driverLocations.get(driverId);
+    if (lastLoc) socket.emit('driverLocationUpdate', lastLoc);
+  });
+
+  socket.on('stopTracking', (data) => {
+    if (data?.customerId) activeTracking.delete(data.customerId);
+  });
+
+  socket.on('driverLocation', (data) => {
+    const driverId = data.driverId || socketUserId;
+    if (!driverId) return;
+    const loc = {
+      driverId,
+      latitude:  Number(data.latitude),
+      longitude: Number(data.longitude),
+      accuracy:  Number(data.accuracy || 5),
+      speed:     Number(data.speed || 0),
+      heading:   Number(data.heading || 0),
+      timestamp: data.timestamp || Date.now(),
+    };
+    driverLocations.set(driverId, loc);
+    for (const [customerId, trackedDriverId] of activeTracking.entries()) {
+      if (trackedDriverId === driverId) emitToUser(customerId, 'driverLocationUpdate', loc);
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────
+  // 📞 WEBRTC VOICE CALL SIGNALING (WHATSAPP-STYLE TWO-WAY)
+  // ─────────────────────────────────────────────────────────
+  socket.on('callUser', (data) => {
+    const receiverId = data.receiverId || data.target;
+    const callerId = data.callerId || data.senderId || socketUserId;
+    console.log(`\n📞 [CALL USER] ${callerId} ➔ ${receiverId} (Caller: ${data.callerName || data.senderName || 'Unknown'})`);
+    emitToUser(receiverId, 'incomingCall', {
+      ...data,
+      callerId,
+      senderId: callerId,
       receiverId,
-      offer,
-      callType,
     });
   });
 
-  socket.on("acceptCall", (data) => {
-    const callerId = data.callerId || data.senderId;
-    const receiverId = data.receiverId;
-    console.log(`✅ CALL ACCEPTED: ${receiverId} accepted ${callerId}`);
-    emitToUser(callerId, "callAccepted", data);
+  socket.on('acceptCall', (data) => {
+    // When receiver accepts, notify the original caller
+    const targetCallerId = data.callerId || data.receiverId;
+    const answeringUserId = data.senderId || socketUserId;
+    console.log(`\n✅ [CALL ACCEPTED] Call accepted by ${answeringUserId} ➔ Notifying caller: ${targetCallerId}`);
+    emitToUser(targetCallerId, 'callAccepted', {
+      ...data,
+      callerId: targetCallerId,
+      senderId: answeringUserId,
+    });
   });
 
-  socket.on("rejectCall", (data) => {
-    const callerId = data.callerId || data.senderId;
-    const receiverId = data.receiverId;
-    console.log(`❌ CALL REJECTED: ${receiverId} rejected ${callerId}`);
-    emitToUser(callerId, "callRejected", data);
+  socket.on('rejectCall', (data) => {
+    const targetCallerId = data.callerId || data.receiverId;
+    const rejectingUserId = data.senderId || socketUserId;
+    console.log(`\n❌ [CALL REJECTED] Call declined by ${rejectingUserId} ➔ Notifying: ${targetCallerId}`);
+    emitToUser(targetCallerId, 'callRejected', {
+      ...data,
+      callerId: targetCallerId,
+      senderId: rejectingUserId,
+    });
   });
 
-  socket.on("endCall", (data) => {
-    const peerId = data.receiverId || data.callerId || data.senderId;
-    console.log(`📴 CALL ENDED with: ${peerId}`);
-    if (peerId) {
-      emitToUser(peerId, "callEnded", data);
-    }
+  socket.on('endCall', (data) => {
+    const otherParty = data.receiverId || data.callerId || data.target;
+    console.log(`\n🛑 [CALL ENDED] Call ended by ${data.senderId || socketUserId} ➔ Notifying: ${otherParty}`);
+    emitToUser(otherParty, 'callEnded', {
+      ...data,
+      senderId: data.senderId || socketUserId,
+    });
   });
 
-  socket.on("offer", (data) => {
-    emitToUser(data.receiverId, "offer", data);
-  });
+  // WebRTC SDP Offer (Support both 'offer' and 'webrtcOffer')
+  const handleOffer = (data) => {
+    const target = data.receiverId || data.target || data.callerId;
+    console.log(`📡 [WEBRTC OFFER] ${data.senderId || socketUserId} ➔ ${target}`);
+    emitToUser(target, 'offer', data);
+    emitToUser(target, 'webrtcOffer', data);
+  };
+  socket.on('offer', handleOffer);
+  socket.on('webrtcOffer', handleOffer);
 
-  socket.on("webrtcOffer", (data) => {
-    emitToUser(data.receiverId, "webrtcOffer", data);
-  });
+  // WebRTC SDP Answer (Support both 'answer' and 'webrtcAnswer')
+  const handleAnswer = (data) => {
+    const target = data.receiverId || data.target || data.callerId;
+    console.log(`📡 [WEBRTC ANSWER] ${data.senderId || socketUserId} ➔ ${target}`);
+    emitToUser(target, 'answer', data);
+    emitToUser(target, 'webrtcAnswer', data);
+  };
+  socket.on('answer', handleAnswer);
+  socket.on('webrtcAnswer', handleAnswer);
 
-  socket.on("answer", (data) => {
-    emitToUser(data.receiverId, "answer", data);
-  });
+  // WebRTC ICE Candidate (Support both 'iceCandidate' and 'webrtcIceCandidate')
+  const handleIce = (data) => {
+    const target = data.receiverId || data.target || data.callerId;
+    emitToUser(target, 'iceCandidate', data);
+    emitToUser(target, 'webrtcIceCandidate', data);
+  };
+  socket.on('iceCandidate', handleIce);
+  socket.on('webrtcIceCandidate', handleIce);
 
-  socket.on("webrtcAnswer", (data) => {
-    emitToUser(data.receiverId, "webrtcAnswer", data);
-  });
-
-  socket.on("iceCandidate", (data) => {
-    emitToUser(data.receiverId, "iceCandidate", data);
-  });
-
-  socket.on("webrtcIceCandidate", (data) => {
-    emitToUser(data.receiverId, "webrtcIceCandidate", data);
-  });
-
-  // ------------------------------------------
-  // DISCONNECT
-  // ------------------------------------------
-  socket.on("disconnect", () => {
-    if (socket.userId) {
-      removeUserSocket(socket.userId, socket.id);
-      console.log(
-        `🔌 USER DISCONNECTED: ${socket.userId} (Socket: ${socket.id})`,
-      );
-      broadcastUserLists();
+  socket.on('disconnect', () => {
+    console.log(`\n🔴 DISCONNECT ─── ${socketUserType.toUpperCase()} LEFT (Socket.io) ──────`);
+    console.log(`   User ID   : ${socketUserId || 'unregistered'}`);
+    console.log(`   Time      : ${now()}`);
+    console.log(`${'─'.repeat(58)}\n`);
+    if (socketUserId && socketIoSockets.has(socketUserId)) {
+      const set = socketIoSockets.get(socketUserId);
+      set.delete(socket.id);
+      if (set.size === 0) socketIoSockets.delete(socketUserId);
     }
   });
 });
 
-const port = Number(process.env.PORT || 3000);
-server.listen(port, "0.0.0.0", () => {
-  console.log(`🚀 CAB SERVER RUNNING ON PORT ${port}`);
-  console.log(`📡 Socket.io ready for Driver & Client connections`);
+// ─────────────────────────────────────────────────────────────
+// 3. HTTP API
+// ─────────────────────────────────────────────────────────────
+app.get('/api/health', (req, res) => {
+  const onlineUsers = [];
+  for (const [userId, info] of userRegistry.entries()) {
+    if (info.online) onlineUsers.push({ userId, userType: info.userType, name: info.name });
+  }
+  res.json({
+    status:              'ok',
+    nativeClientsCount:  nativeSockets.size,
+    socketIoClientsCount: socketIoSockets.size,
+    onlineUsers,
+    timestamp:           Date.now(),
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// START SERVER
+// ─────────────────────────────────────────────────────────────
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`\n${'═'.repeat(58)}`);
+  console.log(`🚀  Cab Server listening on port ${PORT}`);
+  console.log(`📱  Native WebSocket : ws://0.0.0.0:${PORT}/`);
+  console.log(`🔌  Socket.io        : http://0.0.0.0:${PORT}/socket.io/`);
+  console.log(`${'═'.repeat(58)}\n`);
+  console.log(`Waiting for connections...\n`);
 });

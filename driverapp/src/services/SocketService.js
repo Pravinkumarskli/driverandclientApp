@@ -1,7 +1,7 @@
 import { io } from "socket.io-client";
+import { SOCKET_URL } from "../config/AppConfig";
 
-// Configured for local Wi-Fi / physical devices & emulator
-const SERVER_URL = "http://192.168.1.104:3000";
+const SERVER_URL = SOCKET_URL;
 
 class SocketService {
   socket = null;
@@ -12,7 +12,7 @@ class SocketService {
 
     if (this.socket) {
       if (this.socket.connected && userId) {
-        this.socket.emit("register", userId);
+        this.socket.emit("register", { userId, userType: "driver" });
       }
       return;
     }
@@ -29,7 +29,10 @@ class SocketService {
     this.socket.on("connect", () => {
       console.log("DRIVER SOCKET CONNECTED:", this.socket.id);
       if (this.currentUserId) {
-        this.socket.emit("register", this.currentUserId);
+        this.socket.emit("register", {
+          userId: this.currentUserId,
+          userType: "driver",
+        });
       }
     });
 
@@ -84,15 +87,20 @@ class SocketService {
   }
 
   // ------------------------------------------
-  // CALLING & WEBRTC
+  // CALLING & WEBRTC VOICE
   // ------------------------------------------
-  callUser(callerId, receiverId, callerName = "Driver") {
+  sendCall(data) {
+    this.socket?.emit("callUser", data);
+  }
+
+  callUser(callerId, receiverId, callerName = "Driver", offer = null) {
     this.socket?.emit("callUser", {
       callerId,
       senderId: callerId,
       receiverId,
       callerName,
       senderName: callerName,
+      offer,
     });
   }
 
@@ -100,6 +108,7 @@ class SocketService {
     this.socket?.emit("acceptCall", {
       callerId,
       receiverId,
+      senderId: this.currentUserId,
     });
   }
 
@@ -107,38 +116,59 @@ class SocketService {
     this.socket?.emit("rejectCall", {
       callerId,
       receiverId,
+      senderId: this.currentUserId,
     });
   }
 
-  endCall(callerId, receiverId) {
-    this.socket?.emit("endCall", {
-      callerId,
-      receiverId,
-    });
+  endCall(data) {
+    if (typeof data === "object") {
+      this.socket?.emit("endCall", data);
+    } else {
+      this.socket?.emit("endCall", {
+        senderId: this.currentUserId,
+        receiverId: data,
+      });
+    }
   }
 
-  sendOffer(callerId, receiverId, offer) {
-    this.socket?.emit("webrtcOffer", {
-      callerId,
-      receiverId,
-      offer,
-    });
+  sendOffer(data) {
+    this.socket?.emit("offer", data);
   }
 
-  sendAnswer(callerId, receiverId, answer) {
-    this.socket?.emit("webrtcAnswer", {
-      callerId,
-      receiverId,
-      answer,
-    });
+  sendAnswer(data) {
+    this.socket?.emit("answer", data);
   }
 
-  sendIceCandidate(callerId, receiverId, candidate) {
-    this.socket?.emit("webrtcIceCandidate", {
-      callerId,
-      receiverId,
-      candidate,
-    });
+  sendIceCandidate(data) {
+    this.socket?.emit("iceCandidate", data);
+  }
+
+  onIncomingCall(callback) {
+    this.on("incomingCall", callback);
+  }
+
+  onCallAccepted(callback) {
+    this.on("callAccepted", callback);
+  }
+
+  onCallRejected(callback) {
+    this.on("callRejected", callback);
+  }
+
+  onCallEnded(callback) {
+    this.on("callEnded", callback);
+  }
+
+  onOffer(callback) {
+    this.on("offer", callback);
+  }
+
+  onAnswer(callback) {
+    this.on("answer", callback);
+  }
+
+  onIceCandidate(callback) {
+    this.on("iceCandidate", callback);
   }
 
   // ------------------------------------------

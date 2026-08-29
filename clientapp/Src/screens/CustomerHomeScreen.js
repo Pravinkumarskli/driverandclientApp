@@ -10,6 +10,10 @@ import {
 } from "react-native";
 
 import SocketService from "../services/SocketService";
+import NativeSocketService from "../services/NativeSocketService";
+import { clearUserSession } from "../services/AuthSession";
+import { WS_URL } from "../config/AppConfig";
+
 
 export default function CustomerHomeScreen({ route, navigation }) {
   const { userId = "customer_101", userName = "Customer 101" } =
@@ -44,6 +48,32 @@ export default function CustomerHomeScreen({ route, navigation }) {
 
   useEffect(() => {
     SocketService.connect(userId);
+    // Service is already started from LoginScreen. Don't call start() again.
+
+    // Check if opened via initial notification
+    NativeSocketService.getInitialNotificationData().then((data) => {
+      if (data?.senderId) {
+        navigation.navigate("CustomerChat", {
+          userId: userId,
+          receiverId: data.senderId,
+          receiverName: data.receiverName || "Driver",
+          messageId: data.messageId || "",
+        });
+      }
+    });
+
+    // Handle background notification clicks while app was open
+    const unsubscribeNotification = NativeSocketService.onNotificationOpened((data) => {
+      if (data?.senderId) {
+        navigation.navigate("CustomerChat", {
+          userId: userId,
+          receiverId: data.senderId,
+          receiverName: data.receiverName || "Driver",
+          messageId: data.messageId || "",
+        });
+      }
+    });
+
     SocketService.onDriverList((list) => {
       if (Array.isArray(list) && list.length > 0) {
         setDrivers(list);
@@ -64,6 +94,7 @@ export default function CustomerHomeScreen({ route, navigation }) {
     return () => {
       SocketService.off("driverList");
       SocketService.off("incomingCall", incomingCall);
+      unsubscribeNotification();
     };
   }, [navigation, userId]);
 
@@ -91,7 +122,10 @@ export default function CustomerHomeScreen({ route, navigation }) {
     });
   };
 
-  const handleSwitchUser = () => {
+  const handleSwitchUser = async () => {
+    await clearUserSession();
+    NativeSocketService.stop();
+    SocketService.disconnect();
     navigation.replace("CustomerLogin");
   };
 
