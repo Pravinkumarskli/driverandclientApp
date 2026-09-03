@@ -7,6 +7,8 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
+import android.media.AudioAttributes
+import android.media.RingtoneManager
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import com.driverappwebrtc.MainActivity
@@ -21,6 +23,10 @@ class NotificationHelper(private val context: Context) {
 
         const val CHAT_CHANNEL_ID = "driver_chat_messages_channel"
         const val CHAT_CHANNEL_NAME = "Customer Messages"
+
+        const val CALL_CHANNEL_ID = "driver_incoming_calls_channel"
+        const val CALL_CHANNEL_NAME = "Incoming Customer Calls"
+        const val CALL_NOTIFICATION_ID = 4001
     }
 
     private val notificationManager =
@@ -59,8 +65,31 @@ class NotificationHelper(private val context: Context) {
                 lockscreenVisibility = Notification.VISIBILITY_PUBLIC
             }
 
+            // 3. High-Priority Incoming Calls Channel with Ringtone & Vibration
+            val defaultRingtoneUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+            val audioAttributes = AudioAttributes.Builder()
+                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+                .build()
+
+            val callChannel = NotificationChannel(
+                CALL_CHANNEL_ID,
+                CALL_CHANNEL_NAME,
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Incoming voice calls from customers"
+                enableLights(true)
+                lightColor = Color.GREEN
+                enableVibration(true)
+                vibrationPattern = longArrayOf(0, 1000, 500, 1000, 500, 1000)
+                setSound(defaultRingtoneUri, audioAttributes)
+                setShowBadge(true)
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+            }
+
             notificationManager.createNotificationChannel(serviceChannel)
             notificationManager.createNotificationChannel(chatChannel)
+            notificationManager.createNotificationChannel(callChannel)
         }
     }
 
@@ -97,6 +126,7 @@ class NotificationHelper(private val context: Context) {
         val intent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
             putExtra("senderId", senderId)
+            putExtra("receiverId", senderId)
             putExtra("receiverName", senderName)
             putExtra("conversationId", conversationId)
             putExtra("userType", userType)
@@ -126,6 +156,51 @@ class NotificationHelper(private val context: Context) {
             .build()
 
         notificationManager.notify(notificationId, notification)
+    }
+
+    fun showIncomingCallNotification(
+        callerId: String,
+        callerName: String,
+        userType: String = "client",
+        offerJson: String = ""
+    ) {
+        val intent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            putExtra("callerId", callerId)
+            putExtra("callerName", callerName)
+            putExtra("senderId", callerId)
+            putExtra("receiverName", callerName)
+            putExtra("userType", userType)
+            putExtra("offer", offerJson)
+            putExtra("action", "INCOMING_CALL")
+        }
+
+        val pendingIntent = PendingIntent.getActivity(
+            context,
+            CALL_NOTIFICATION_ID,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val notification = NotificationCompat.Builder(context, CALL_CHANNEL_ID)
+            .setContentTitle("📞 Incoming Call")
+            .setContentText("$callerName is calling you...")
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setAutoCancel(true)
+            .setOngoing(true)
+            .setContentIntent(pendingIntent)
+            .setFullScreenIntent(pendingIntent, true)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .addAction(R.mipmap.ic_launcher, "ANSWER", pendingIntent)
+            .build()
+
+        notificationManager.notify(CALL_NOTIFICATION_ID, notification)
+    }
+
+    fun cancelCallNotification() {
+        notificationManager.cancel(CALL_NOTIFICATION_ID)
     }
 
     fun updateForegroundNotification(statusText: String) {

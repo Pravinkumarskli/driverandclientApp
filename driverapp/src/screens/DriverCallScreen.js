@@ -30,6 +30,9 @@ export default function DriverCallScreen({ route, navigation }) {
 
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const timerRef = useRef(null);
+  const ringingTimeoutRef = useRef(null);
+
+  const RINGING_TIMEOUT_MS = 40000; // 40 seconds auto-cut
 
   // Pulse animation while ringing
   useEffect(() => {
@@ -134,6 +137,22 @@ export default function DriverCallScreen({ route, navigation }) {
 
         setCallStatus("Ringing...");
 
+        // ── 40s Auto-Cut Timer ──────────────────────────────────
+        ringingTimeoutRef.current = setTimeout(() => {
+          if (isMounted && !connected) {
+            console.log("⏱️ [DRIVER] 40s ringing timeout — auto-cutting call");
+            setCallStatus("No Answer");
+            SocketService.endCall({
+              senderId: userId,
+              receiverId: receiverId,
+            });
+            WebRTCService.close();
+            setTimeout(() => {
+              if (isMounted) navigation.goBack();
+            }, 1500);
+          }
+        }, RINGING_TIMEOUT_MS);
+
         // 5. Listen for WebRTC Answer
         SocketService.onAnswer(async (data) => {
           console.log("✅ [DRIVER] Received Answer from Customer:", data?.senderId);
@@ -142,6 +161,11 @@ export default function DriverCallScreen({ route, navigation }) {
               await WebRTCService.setRemoteAnswer(data.answer);
             }
             if (isMounted) {
+              // Clear ringing timeout — call was answered
+              if (ringingTimeoutRef.current) {
+                clearTimeout(ringingTimeoutRef.current);
+                ringingTimeoutRef.current = null;
+              }
               setConnected(true);
               setCallStatus("Connected");
             }
@@ -154,15 +178,24 @@ export default function DriverCallScreen({ route, navigation }) {
         SocketService.onCallAccepted(() => {
           console.log("✅ [DRIVER] Customer accepted call!");
           if (isMounted) {
+            // Clear ringing timeout — call was accepted
+            if (ringingTimeoutRef.current) {
+              clearTimeout(ringingTimeoutRef.current);
+              ringingTimeoutRef.current = null;
+            }
             setConnected(true);
             setCallStatus("Connected");
           }
         });
 
-        // 7. Listen for Call Rejected
+      
         SocketService.onCallRejected(() => {
           console.log("❌ [DRIVER] Customer declined call");
           if (isMounted) {
+            if (ringingTimeoutRef.current) {
+              clearTimeout(ringingTimeoutRef.current);
+              ringingTimeoutRef.current = null;
+            }
             setCallStatus("Call Declined");
             setTimeout(() => navigation.goBack(), 1200);
           }
@@ -172,6 +205,10 @@ export default function DriverCallScreen({ route, navigation }) {
         SocketService.onCallEnded(() => {
           console.log("🛑 [DRIVER] Customer ended call");
           if (isMounted) {
+            if (ringingTimeoutRef.current) {
+              clearTimeout(ringingTimeoutRef.current);
+              ringingTimeoutRef.current = null;
+            }
             setCallStatus("Call Ended");
             setTimeout(() => navigation.goBack(), 800);
           }
@@ -194,6 +231,10 @@ export default function DriverCallScreen({ route, navigation }) {
 
     return () => {
       isMounted = false;
+      if (ringingTimeoutRef.current) {
+        clearTimeout(ringingTimeoutRef.current);
+        ringingTimeoutRef.current = null;
+      }
       WebRTCService.close();
       SocketService.off("answer");
       SocketService.off("callAccepted");

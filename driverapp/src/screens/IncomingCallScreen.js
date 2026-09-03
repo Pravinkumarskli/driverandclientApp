@@ -21,6 +21,9 @@ export default function IncomingCallScreen({ route, navigation }) {
   } = route.params || {};
 
   const pulseAnim = useRef(new Animated.Value(1)).current;
+  const autoRejectTimerRef = useRef(null);
+
+  const AUTO_REJECT_TIMEOUT_MS = 40000; // 40 seconds auto-reject
 
   useEffect(() => {
     // Pulsating animation for incoming ring
@@ -42,18 +45,41 @@ export default function IncomingCallScreen({ route, navigation }) {
     // If caller cancels or ends call while ringing
     const handleCallEnded = () => {
       console.log("🛑 Caller cancelled incoming call");
+      if (autoRejectTimerRef.current) {
+        clearTimeout(autoRejectTimerRef.current);
+        autoRejectTimerRef.current = null;
+      }
       navigation.goBack();
     };
 
     SocketService.onCallEnded(handleCallEnded);
 
+    // Auto-reject after 40 seconds if not answered
+    autoRejectTimerRef.current = setTimeout(() => {
+      console.log("⏱️ [DRIVER] 40s incoming call timeout — auto-rejecting");
+      SocketService.rejectCall(callerId, receiverId);
+      SocketService.endCall({
+        senderId: receiverId,
+        receiverId: callerId,
+      });
+      navigation.goBack();
+    }, AUTO_REJECT_TIMEOUT_MS);
+
     return () => {
       SocketService.off("callEnded", handleCallEnded);
+      if (autoRejectTimerRef.current) {
+        clearTimeout(autoRejectTimerRef.current);
+        autoRejectTimerRef.current = null;
+      }
     };
-  }, [navigation, pulseAnim]);
+  }, [navigation, pulseAnim, callerId, receiverId]);
 
   const handleAccept = () => {
     console.log("📞 [DRIVER ACCEPT CALL] Accepting call from:", callerId);
+    if (autoRejectTimerRef.current) {
+      clearTimeout(autoRejectTimerRef.current);
+      autoRejectTimerRef.current = null;
+    }
     navigation.replace("VoiceCallScreen", {
       callerId,
       callerName,
@@ -65,7 +91,15 @@ export default function IncomingCallScreen({ route, navigation }) {
 
   const handleDecline = () => {
     console.log("❌ [DRIVER DECLINE CALL] Declining call from:", callerId);
+    if (autoRejectTimerRef.current) {
+      clearTimeout(autoRejectTimerRef.current);
+      autoRejectTimerRef.current = null;
+    }
     SocketService.rejectCall(callerId, receiverId);
+    SocketService.endCall({
+      senderId: receiverId,
+      receiverId: callerId,
+    });
     navigation.goBack();
   };
 

@@ -21,6 +21,9 @@ export default function CustomerIncomingCallScreen({ route, navigation }) {
 
   const [accepting, setAccepting] = useState(false);
   const [status, setStatus] = useState("Incoming voice call...");
+  const autoRejectTimerRef = useRef(null);
+
+  const AUTO_REJECT_TIMEOUT_MS = 40000; // 40 seconds auto-reject
 
   const [callStatus, setCallStatus] = useState("Incoming voice call...");
   const [connected, setConnected] = useState(false);
@@ -105,6 +108,11 @@ export default function CustomerIncomingCallScreen({ route, navigation }) {
 
   const acceptCall = async () => {
     try {
+      // Clear auto-reject timer on accept
+      if (autoRejectTimerRef.current) {
+        clearTimeout(autoRejectTimerRef.current);
+        autoRejectTimerRef.current = null;
+      }
       CallSoundService.stopAll();
 
       console.log("================================");
@@ -118,77 +126,45 @@ export default function CustomerIncomingCallScreen({ route, navigation }) {
       await WebRTCService.createPeerConnection(
         (candidate) => {
           console.log("CUSTOMER SEND ICE");
-
           SocketService.sendIceCandidate({
-            senderId: callerId,
-
-            receiverId: receiverId,
-
+            senderId: receiverId,
+            receiverId: callerId,
             candidate: candidate,
           });
         },
-
         (remoteStream) => {
           console.log("CUSTOMER REMOTE AUDIO RECEIVED");
-
           setConnected(true);
-
           setCallStatus("Connected");
         },
       );
 
       setCallStatus("Opening microphone...");
-
       await WebRTCService.getLocalAudio();
 
       setCallStatus("Creating offer...");
-
-      // const offer =
-      //     await WebRTCService
-      //         .createOffer();
-
       console.log("CUSTOMER OFFER:", offer);
 
       const answer = await WebRTCService.createAnswer(offer);
-
       console.log("DRIVER ANSWER:", answer);
 
       SocketService.sendAnswer({
         senderId: receiverId,
-
         receiverId: callerId,
-
         answer: answer,
       });
 
-      // // Driver creates ANSWER
-      // const answer = await WebRTCService.createAnswer();
-
-      // console.log(
-      //     "DRIVER ANSWER:",
-      //     JSON.stringify(answer)
-      // );
-
-      // // Send answer back to customer
-      // SocketService.sendAnswer(
-      //     receiverId,
-      //     callerId,
-      //     answer
-      // );
-
       console.log("DRIVER ANSWER SENT");
-
       setStatus("Connected");
 
       navigation.replace("CustomerAnswerCallScreen", {
         callerId: callerId,
         callerName: receiverName,
+        userId: receiverId,
       });
     } catch (error) {
       console.log("CUSTOMER ACCEPT CALL ERROR:", error);
-
       setStatus("Call failed");
-
       Alert.alert("Call Error", error?.message || "Unable to accept call");
     }
   };
@@ -197,14 +173,18 @@ export default function CustomerIncomingCallScreen({ route, navigation }) {
     console.log("CUSTOMER DECLINE CALL");
 
     try {
+      // Clear auto-reject timer on manual decline
+      if (autoRejectTimerRef.current) {
+        clearTimeout(autoRejectTimerRef.current);
+        autoRejectTimerRef.current = null;
+      }
       CallSoundService.stopAll();
 
-      if (typeof SocketService.rejectCall === "function") {
-        SocketService.rejectCall({
-          senderId: receiverId,
-          receiverId: callerId,
-        });
-      }
+      SocketService.rejectCall(callerId, receiverId);
+      SocketService.endCall({
+        senderId: receiverId,
+        receiverId: callerId,
+      });
     } catch (error) {
       console.log("DECLINE ERROR:", error);
     }
@@ -215,10 +195,44 @@ export default function CustomerIncomingCallScreen({ route, navigation }) {
   useEffect(() => {
     CallSoundService.startIncomingRingtone();
 
+    // If caller cancels or ends call while ringing
+    const handleCallEnded = () => {
+      console.log("🛑 Caller ended / cancelled incoming call");
+      CallSoundService.stopAll();
+      if (autoRejectTimerRef.current) {
+        clearTimeout(autoRejectTimerRef.current);
+        autoRejectTimerRef.current = null;
+      }
+      navigation.goBack();
+    };
+
+    SocketService.onCallEnded(handleCallEnded);
+
+    // Auto-reject after 40 seconds if not answered
+    autoRejectTimerRef.current = setTimeout(() => {
+      console.log("⏱️ [CLIENT] 40s incoming call timeout — auto-rejecting");
+      try {
+        CallSoundService.stopAll();
+        SocketService.rejectCall(callerId, receiverId);
+        SocketService.endCall({
+          senderId: receiverId,
+          receiverId: callerId,
+        });
+      } catch (error) {
+        console.log("AUTO-REJECT ERROR:", error);
+      }
+      navigation.goBack();
+    }, AUTO_REJECT_TIMEOUT_MS);
+
     return () => {
       CallSoundService.stopAll();
+      SocketService.off("callEnded", handleCallEnded);
+      if (autoRejectTimerRef.current) {
+        clearTimeout(autoRejectTimerRef.current);
+        autoRejectTimerRef.current = null;
+      }
     };
-  }, []);
+  }, [callerId, receiverId, navigation]);
 
   const firstLetter = receiverName ? receiverName.charAt(0).toUpperCase() : "D";
 

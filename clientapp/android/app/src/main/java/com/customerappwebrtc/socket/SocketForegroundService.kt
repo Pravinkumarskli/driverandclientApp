@@ -113,9 +113,9 @@ class SocketForegroundService : Service(), NativeWebSocketManager.SocketEventLis
         // 2. Show notification when app is backgrounded or JS runtime is detached
         if (!isAppInForeground || clientListener == null) {
             try {
-                acquireWakeLock(3000)
+                acquireWakeLock(10000)
                 val json = JSONObject(messageJson)
-                val eventType = json.optString("type", "chat")
+                val eventType = json.optString("type", "")
 
                 if (eventType == "chat" || eventType == "receiveMessage") {
                     val senderId = json.optString("senderId", "Driver")
@@ -133,9 +133,23 @@ class SocketForegroundService : Service(), NativeWebSocketManager.SocketEventLis
                         userType = userType,
                         messageId = messageId
                     )
+                } else if (eventType == "incomingCall" || eventType == "callUser") {
+                    val callerId = json.optString("callerId", json.optString("senderId", "Driver"))
+                    val callerName = json.optString("callerName", json.optString("senderName", "Driver"))
+                    val userType = json.optString("userType", json.optString("senderType", "driver"))
+                    val offerJson = json.optString("offer", "")
+
+                    notificationHelper.showIncomingCallNotification(
+                        callerId = callerId,
+                        callerName = callerName,
+                        userType = userType,
+                        offerJson = offerJson
+                    )
+                } else if (eventType == "endCall" || eventType == "callEnded" || eventType == "callRejected") {
+                    notificationHelper.cancelCallNotification()
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Error displaying message notification: ${e.message}", e)
+                Log.e(TAG, "Error displaying message/call notification: ${e.message}", e)
             }
         }
     }

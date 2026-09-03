@@ -33,6 +33,7 @@ class NativeWebSocketManager(
         fun onSocketConnected()
         fun onSocketRegistered(userId: String, userType: String)
         fun onError(errorMessage: String)
+        fun onLocationUpdate(latitude: Double, longitude: Double, speed: Float, heading: Float, accuracy: Float, timestamp: Long) {}
     }
 
     private var client: OkHttpClient = OkHttpClient.Builder()

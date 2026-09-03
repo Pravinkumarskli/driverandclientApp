@@ -83,6 +83,7 @@ class SocketService {
   // ------------------------------------------
   sendLocation(locationData) {
     if (!this.socket) return;
+    console.log("driverloaction",locationData)
     this.socket.emit("driverLocation", locationData);
   }
 
@@ -105,24 +106,52 @@ class SocketService {
   }
 
   acceptCall(callerId, receiverId) {
-    this.socket?.emit("acceptCall", {
-      callerId,
-      receiverId,
-      senderId: this.currentUserId,
-    });
+    if (typeof callerId === "object" && callerId !== null) {
+      const cId = callerId.callerId || callerId.receiverId;
+      const sId = callerId.senderId || this.currentUserId;
+      this.socket?.emit("acceptCall", {
+        ...callerId,
+        callerId: cId,
+        receiverId: cId,
+        senderId: sId,
+      });
+    } else {
+      this.socket?.emit("acceptCall", {
+        callerId,
+        receiverId: receiverId || callerId,
+        senderId: this.currentUserId,
+      });
+    }
   }
 
   rejectCall(callerId, receiverId) {
-    this.socket?.emit("rejectCall", {
-      callerId,
-      receiverId,
-      senderId: this.currentUserId,
-    });
+    if (typeof callerId === "object" && callerId !== null) {
+      const cId = callerId.callerId || callerId.receiverId;
+      const sId = callerId.senderId || this.currentUserId;
+      this.socket?.emit("rejectCall", {
+        ...callerId,
+        callerId: cId,
+        receiverId: cId,
+        senderId: sId,
+      });
+    } else {
+      this.socket?.emit("rejectCall", {
+        callerId,
+        receiverId: receiverId || callerId,
+        senderId: this.currentUserId,
+      });
+    }
   }
 
   endCall(data) {
-    if (typeof data === "object") {
-      this.socket?.emit("endCall", data);
+    if (typeof data === "object" && data !== null) {
+      const recId = data.receiverId || data.callerId || data.target;
+      const sendId = data.senderId || this.currentUserId;
+      this.socket?.emit("endCall", {
+        ...data,
+        senderId: sendId,
+        receiverId: recId,
+      });
     } else {
       this.socket?.emit("endCall", {
         senderId: this.currentUserId,

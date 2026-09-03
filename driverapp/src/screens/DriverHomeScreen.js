@@ -12,6 +12,7 @@ import {
 import SocketService from "../services/SocketService";
 import NativeSocketService from "../services/NativeSocketService";
 import { clearDriverSession } from "../services/AuthSession";
+import LocationTracker from './LocationTracker'
 
 
 export default function DriverHomeScreen({ route, navigation }) {
@@ -35,23 +36,17 @@ export default function DriverHomeScreen({ route, navigation }) {
   useEffect(() => {
     SocketService.connect(driverId);
 
-    // The foreground socket service is started once during login. Starting it
-    // again here can crash some Android devices when the service is rebinding.
-    NativeSocketService.getInitialNotificationData()
-      .then((data) => {
-        if (data?.senderId) {
-          navigation.navigate("DriverChat", {
-            userId: driverId,
-            receiverId: data.senderId,
-            receiverName: data.receiverName || "Customer",
-            messageId: data.messageId || "",
-          });
-        }
-      })
-      .catch((error) => console.warn("Notification launch data unavailable:", error));
-
-    const unsubscribeNotification = NativeSocketService.onNotificationOpened((data) => {
-      if (data?.senderId) {
+    const handleNotificationRoute = (data) => {
+      if (!data) return;
+      console.log("🔔 [DRIVER NOTIFICATION OPENED]:", data);
+      if (data.action === "INCOMING_CALL" || data.callerId) {
+        navigation.navigate("IncomingCall", {
+          callerId: data.callerId || data.senderId,
+          callerName: data.callerName || data.receiverName || "Customer 101",
+          receiverId: driverId,
+          offer: data.offer || null,
+        });
+      } else if (data.action === "OPEN_CHAT" || data.senderId) {
         navigation.navigate("DriverChat", {
           userId: driverId,
           receiverId: data.senderId,
@@ -59,7 +54,13 @@ export default function DriverHomeScreen({ route, navigation }) {
           messageId: data.messageId || "",
         });
       }
-    });
+    };
+
+    NativeSocketService.getInitialNotificationData()
+      .then(handleNotificationRoute)
+      .catch((error) => console.warn("Notification launch data unavailable:", error));
+
+    const unsubscribeNotification = NativeSocketService.onNotificationOpened(handleNotificationRoute);
 
     const handleIncomingCall = (data) => {
       navigation.navigate("IncomingCall", {
@@ -261,6 +262,7 @@ export default function DriverHomeScreen({ route, navigation }) {
           </TouchableOpacity>
         </View>
       </View>
+        <LocationTracker driverId={driverId} />
     </SafeAreaView>
   );
 }

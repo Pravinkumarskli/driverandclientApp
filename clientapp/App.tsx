@@ -9,6 +9,7 @@ import CustomerIncomingCallScreen from "./Src/screens/CustomerIncomingCallScreen
 import CustomerAnswerCallScreen from "./Src/screens/CustomerAnswerCallScreen";
 import CustomerTrackingScreen from "./Src/screens/CustomerTrackingScreen";
 import CustomerChatScreen from "./Src/screens/CustomerChatScreen";
+import MapScreen from "./Src/screens/MapScreen";
 
 const Stack = createNativeStackNavigator();
 
@@ -67,6 +68,13 @@ export default function App() {
         <Stack.Screen
           name="CustomerChat"
           component={CustomerChatScreen}
+          options={{
+            headerShown: false,
+          }}
+        />
+        <Stack.Screen
+          name="Map"
+          component={MapScreen}
           options={{
             headerShown: false,
           }}

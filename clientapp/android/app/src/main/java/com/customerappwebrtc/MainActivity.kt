@@ -29,7 +29,9 @@ class MainActivity : ReactActivity() {
   }
 
   private fun handleNotificationIntent(intent: Intent?) {
-    if (intent?.getStringExtra("action") == "OPEN_CHAT") {
+    val action = intent?.getStringExtra("action") ?: return
+
+    if (action == "OPEN_CHAT") {
       val senderId = intent.getStringExtra("senderId") ?: return
       val receiverName = intent.getStringExtra("receiverName") ?: "Driver"
       val conversationId = intent.getStringExtra("conversationId") ?: ""
@@ -44,6 +46,30 @@ class MainActivity : ReactActivity() {
         putString("userType", userType)
         putString("messageId", messageId)
         putString("action", "OPEN_CHAT")
+      }
+
+      NativeSocketModule.initialNotificationData = params
+
+      reactInstanceManager?.currentReactContext?.let { context ->
+        if (context.hasActiveReactInstance()) {
+          context.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+            .emit("onNotificationOpened", params)
+        }
+      }
+    } else if (action == "INCOMING_CALL") {
+      val callerId = intent.getStringExtra("callerId") ?: intent.getStringExtra("senderId") ?: "Driver"
+      val callerName = intent.getStringExtra("callerName") ?: intent.getStringExtra("receiverName") ?: "Driver"
+      val userType = intent.getStringExtra("userType") ?: "driver"
+      val offer = intent.getStringExtra("offer") ?: ""
+
+      val params = Arguments.createMap().apply {
+        putString("callerId", callerId)
+        putString("senderId", callerId)
+        putString("callerName", callerName)
+        putString("receiverName", callerName)
+        putString("userType", userType)
+        putString("offer", offer)
+        putString("action", "INCOMING_CALL")
       }
 
       NativeSocketModule.initialNotificationData = params

@@ -197,6 +197,24 @@ class NativeSocketModule(private val reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
+    fun triggerLocationUpdate() {
+        service?.triggerLocationUpdate()
+    }
+
+    override fun onLocationUpdate(latitude: Double, longitude: Double, speed: Float, heading: Float, accuracy: Float, timestamp: Long) {
+        val map = Arguments.createMap().apply {
+            putDouble("latitude", latitude)
+            putDouble("longitude", longitude)
+            putDouble("speed", speed.toDouble())
+            putDouble("heading", heading.toDouble())
+            putDouble("accuracy", accuracy.toDouble())
+            putDouble("timestamp", timestamp.toDouble())
+        }
+        sendEvent("onLocationUpdate", map)
+        sendEvent("driverLocation", map)
+    }
+
+    @ReactMethod
     fun addListener(eventName: String) {
         // Keep React Native event emitter happy
     }

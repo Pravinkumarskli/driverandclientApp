@@ -18,7 +18,6 @@ import MapView, {
 
 import SocketService from '../services/SocketService';
 
-// Route coordinates connecting Kalapet Beach to Pondicherry White Town
 const ROUTE_COORDINATES = [
   { latitude: 12.0125, longitude: 79.8550 },
   { latitude: 12.0050, longitude: 79.8510 },
@@ -32,7 +31,7 @@ const ROUTE_COORDINATES = [
 
 const TOTAL_STEPS = 80;
 
-export default function DriverTrackingScreen({ route, navigation }) {
+export default function MapScreen({ route, navigation }) {
   const {
     driverId = 'driver_201',
     customerId = 'customer_101',
@@ -72,7 +71,6 @@ export default function DriverTrackingScreen({ route, navigation }) {
   useEffect(() => {
     SocketService.connect(driverId);
 
-    // Initial broadcast
     SocketService.sendLocation({
       driverId,
       latitude: driverCoord.latitude,
@@ -107,7 +105,6 @@ export default function DriverTrackingScreen({ route, navigation }) {
       setSpeed(simulatedSpeed);
       setBroadcastCount((prev) => prev + 1);
 
-      // Smoothly animate the driver vehicle marker to the new coordinates
       animatedDriverCoord
         .timing({
           latitude: nextLat,
@@ -132,7 +129,7 @@ export default function DriverTrackingScreen({ route, navigation }) {
       clearInterval(interval);
       SocketService.disconnect?.();
     };
-  }, [driverId, pickupCoord.latitude, pickupCoord.longitude, dropCoord.latitude, dropCoord.longitude]);
+  }, []);
 
   const recenterMap = () => {
     if (mapRef.current) {
@@ -201,7 +198,6 @@ export default function DriverTrackingScreen({ route, navigation }) {
     <View style={{ flex: 1 }}>
       <StatusBar barStyle="dark-content" backgroundColor="transparent" translucent />
 
-      {/* Floating Top Header Actions */}
       <SafeAreaView style={styles.topSafeArea}>
         <View style={styles.header}>
           <TouchableOpacity
@@ -238,7 +234,6 @@ export default function DriverTrackingScreen({ route, navigation }) {
         </View>
       </SafeAreaView>
 
-      {/* Full-screen MapView with Google Provider */}
       <MapView
         ref={mapRef}
         provider={PROVIDER_GOOGLE}
@@ -253,21 +248,18 @@ export default function DriverTrackingScreen({ route, navigation }) {
         zoomEnabled={true}
         scrollEnabled={true}
       >
-        {/* Origin / Pickup Marker */}
         <Marker coordinate={pickupCoord} title="Pickup Point" description="Kalapet Beach Road">
           <View style={[styles.marker, styles.markerPickup]}>
             <Text style={styles.markerIcon}>📍</Text>
           </View>
         </Marker>
 
-        {/* Destination / Drop Marker */}
         <Marker coordinate={dropCoord} title="Drop Point" description="Pondicherry White Town">
           <View style={[styles.marker, styles.markerDrop]}>
             <Text style={styles.markerIcon}>🏠</Text>
           </View>
         </Marker>
 
-        {/* Real-time Driver Location Marker with Smooth Animation */}
         <MarkerAnimated
           coordinate={animatedDriverCoord}
           title="Your Vehicle Location"
@@ -278,13 +270,10 @@ export default function DriverTrackingScreen({ route, navigation }) {
           </View>
         </MarkerAnimated>
 
-        {/* Route Polyline */}
         <Polyline coordinates={ROUTE_COORDINATES} strokeColor="#0F172A" strokeWidth={4} />
       </MapView>
 
-      {/* Bottom Sheet Section */}
       <SafeAreaView style={styles.sheet}>
-        {/* Sheet Header */}
         <View style={styles.sheetHeader}>
           <Text style={styles.sheetTitle}>
             {hasArrived ? 'Arrived at destination' : 'Trip in progress'}
@@ -298,14 +287,12 @@ export default function DriverTrackingScreen({ route, navigation }) {
           </Text>
         </View>
 
-        {/* Passenger Section with Quick Actions */}
         <View style={styles.sheetSection}>
           <View style={styles.sectionInfo}>
             <Text style={styles.sectionTitle}>Passenger</Text>
             <Text style={styles.sectionSubtitle}>{customerName} • +91 98765 43210</Text>
           </View>
 
-          {/* Broadcast Toggle Pill */}
           <TouchableOpacity onPress={toggleBroadcast} activeOpacity={0.8}>
             <View style={[styles.btnSm, isBroadcasting ? styles.btnSmActive : styles.btnSmInactive]}>
               <Text
@@ -319,7 +306,6 @@ export default function DriverTrackingScreen({ route, navigation }) {
             </View>
           </TouchableOpacity>
 
-          {/* Phone Call Button */}
           <TouchableOpacity
             onPress={openCall}
             style={[styles.btnSm, styles.btnIconOnly, styles.callBtn]}
@@ -328,7 +314,6 @@ export default function DriverTrackingScreen({ route, navigation }) {
             <Text style={styles.actionEmoji}>📞</Text>
           </TouchableOpacity>
 
-          {/* Message / Chat Button */}
           <TouchableOpacity
             onPress={openChat}
             style={[styles.btnSm, styles.btnIconOnly, styles.chatBtn]}
@@ -338,7 +323,6 @@ export default function DriverTrackingScreen({ route, navigation }) {
           </TouchableOpacity>
         </View>
 
-        {/* Route / Trip Section */}
         <View style={styles.sheetSection}>
           <View style={styles.sectionInfo}>
             <Text style={styles.sectionTitle}>Drop-off Location</Text>
@@ -352,7 +336,6 @@ export default function DriverTrackingScreen({ route, navigation }) {
           </TouchableOpacity>
         </View>
 
-        {/* Section Footer: Primary & Secondary Action Buttons */}
         <View style={styles.sectionFooter}>
           <TouchableOpacity onPress={handleCompleteTrip} activeOpacity={0.8}>
             <View style={styles.btnPrimary}>
@@ -372,183 +355,129 @@ export default function DriverTrackingScreen({ route, navigation }) {
 }
 
 const styles = StyleSheet.create({
-  map: {
-    flex: 1,
-    position: "absolute",
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    zIndex: -1,
-  },
+  map: { flex: 1, position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: -1 },
   marker: {
     width: 36,
     height: 36,
     borderRadius: 18,
-    alignItems: "center",
-    justifyContent: "center",
+    alignItems: 'center',
+    justifyContent: 'center',
     elevation: 6,
-    shadowColor: "#000",
+    shadowColor: '#000',
     shadowOpacity: 0.25,
     shadowRadius: 4,
     shadowOffset: { width: 0, height: 2 },
   },
-  markerPickup: { backgroundColor: "#2563EB" },
-  markerDrop: { backgroundColor: "#059669" },
-  markerDriver: { backgroundColor: "#DC2626", width: 40, height: 40, borderRadius: 20 },
+  markerPickup: { backgroundColor: '#2563EB' },
+  markerDrop: { backgroundColor: '#059669' },
+  markerDriver: { backgroundColor: '#DC2626', width: 40, height: 40, borderRadius: 20 },
   markerIcon: { fontSize: 18 },
-  topSafeArea: {
-    backgroundColor: "transparent",
-  },
+  topSafeArea: { backgroundColor: 'transparent' },
   header: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-    justifyContent: "space-between",
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
     paddingHorizontal: 14,
     paddingTop: 12,
   },
-  headerActions: { alignItems: "flex-end" },
+  headerActions: { alignItems: 'flex-end' },
   btn: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
     borderRadius: 9999,
     paddingVertical: 8,
     paddingHorizontal: 16,
     borderWidth: 1,
-    backgroundColor: "#FFFFFF",
-    borderColor: "#E2E8F0",
+    backgroundColor: '#FFFFFF',
+    borderColor: '#E2E8F0',
     marginBottom: 8,
-    shadowColor: "#000",
+    shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.15,
     shadowRadius: 3,
     elevation: 4,
   },
   btnClose: { width: 42, height: 42, paddingHorizontal: 0 },
-  closeIcon: { fontSize: 16, fontWeight: "800", color: "#0F172A" },
-  navIcon: { fontSize: 16, fontWeight: "800", color: "#2563EB", transform: [{ rotate: "-45deg" }] },
-  btnText: { fontSize: 14, fontWeight: "800", color: "#0F172A", letterSpacing: 0.3 },
+  closeIcon: { fontSize: 16, fontWeight: '800', color: '#0F172A' },
+  navIcon: { fontSize: 16, fontWeight: '800', color: '#2563EB', transform: [{ rotate: '-45deg' }] },
+  btnText: { fontSize: 14, fontWeight: '800', color: '#0F172A', letterSpacing: 0.3 },
   btnSm: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
     borderRadius: 9999,
     paddingVertical: 8,
     paddingHorizontal: 14,
     borderWidth: 1,
-    backgroundColor: "#F1F5F9",
-    borderColor: "#E2E8F0",
+    backgroundColor: '#F1F5F9',
+    borderColor: '#E2E8F0',
     marginLeft: 6,
   },
-  btnSmActive: { backgroundColor: "#DCFCE7", borderColor: "#86EFAC" },
-  btnSmText: { fontSize: 13, fontWeight: "700", color: "#0F172A" },
-  btnSmTextActive: { color: "#16A34A" },
+  btnSmActive: { backgroundColor: '#DCFCE7', borderColor: '#86EFAC' },
+  btnSmInactive: { backgroundColor: '#FEE2E2', borderColor: '#FCA5A5' },
+  btnSmText: { fontSize: 13, fontWeight: '700', color: '#0F172A' },
+  btnSmTextActive: { color: '#16A34A' },
+  btnSmTextInactive: { color: '#DC2626' },
   btnIconOnly: { width: 40, height: 40, paddingHorizontal: 0, borderRadius: 20 },
-  callBtn: { backgroundColor: "#EFF6FF", borderColor: "#BFDBFE" },
-  chatBtn: { backgroundColor: "#ECFDF5", borderColor: "#A7F3D0" },
+  callBtn: { backgroundColor: '#EFF6FF', borderColor: '#BFDBFE' },
+  chatBtn: { backgroundColor: '#ECFDF5', borderColor: '#A7F3D0' },
   actionEmoji: { fontSize: 16 },
   btnPrimary: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
     borderRadius: 12,
     paddingVertical: 14,
     paddingHorizontal: 16,
-    backgroundColor: "#16A34A",
+    backgroundColor: '#16A34A',
     elevation: 3,
-    shadowColor: "#16A34A",
+    shadowColor: '#16A34A',
     shadowOpacity: 0.3,
     shadowRadius: 6,
     shadowOffset: { width: 0, height: 2 },
   },
-  btnPrimaryText: { fontSize: 16, fontWeight: "800", color: "#FFFFFF", letterSpacing: 0.5 },
+  btnPrimaryText: { fontSize: 16, fontWeight: '800', color: '#FFFFFF', letterSpacing: 0.5 },
   btnEmpty: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
     borderRadius: 12,
     paddingVertical: 10,
     paddingHorizontal: 16,
-    backgroundColor: "transparent",
+    backgroundColor: 'transparent',
     marginTop: 4,
   },
-  btnEmptyText: { fontSize: 14, fontWeight: "700", color: "#64748B" },
+  btnEmptyText: { fontSize: 14, fontWeight: '700', color: '#64748B' },
   sheet: {
-    marginTop: "auto",
-    backgroundColor: "#FFFFFF",
+    marginTop: 'auto',
+    backgroundColor: '#FFFFFF',
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     paddingBottom: 20,
     elevation: 16,
-    shadowColor: "#000",
+    shadowColor: '#000',
     shadowOpacity: 0.15,
     shadowRadius: 16,
     shadowOffset: { width: 0, height: -4 },
     borderWidth: 1,
-    borderColor: "#F1F5F9",
+    borderColor: '#F1F5F9',
   },
-  sheetHeader: {
-    paddingHorizontal: 20,
-    paddingTop: 16,
-    paddingBottom: 12,
-    borderBottomWidth: 1,
-    borderColor: "#F1F5F9",
-  },
-  sheetTitle: { fontSize: 20, fontWeight: "800", color: "#0F172A", marginBottom: 2 },
-  sheetSubtitle: { fontSize: 13, fontWeight: "500", color: "#64748B" },
-  boldText: { fontWeight: "800", color: "#0F172A" },
-  speedBadge: { color: "#059669", fontWeight: "700" },
+  sheetHeader: { paddingHorizontal: 20, paddingTop: 16, paddingBottom: 12, borderBottomWidth: 1, borderColor: '#F1F5F9' },
+  sheetTitle: { fontSize: 20, fontWeight: '800', color: '#0F172A', marginBottom: 2 },
+  sheetSubtitle: { fontSize: 13, fontWeight: '500', color: '#64748B' },
+  speedBadge: { color: '#059669', fontWeight: '700' },
+  broadcastTag: { color: '#2563EB', fontWeight: '700' },
   sheetSection: {
-    flexDirection: "row",
-    alignItems: "center",
+    flexDirection: 'row',
+    alignItems: 'center',
     paddingHorizontal: 20,
     paddingVertical: 12,
     borderBottomWidth: 1,
-    borderColor: "#F1F5F9",
+    borderColor: '#F1F5F9',
   },
   sectionInfo: { flex: 1, marginRight: 10 },
-  sectionTitle: { fontSize: 15, fontWeight: "800", color: "#0F172A", marginBottom: 2 },
-  sectionSubtitle: { fontSize: 12, color: "#64748B", fontWeight: "500" },
+  sectionTitle: { fontSize: 15, fontWeight: '800', color: '#0F172A', marginBottom: 2 },
+  sectionSubtitle: { fontSize: 12, color: '#64748B', fontWeight: '500' },
   sectionFooter: { paddingHorizontal: 20, paddingTop: 12 },
 });
-
-// import React from 'react';
-// import {View, StyleSheet} from 'react-native';
-// import MapView, {Marker} from 'react-native-maps';
-
-// const MapScreen = () => {
-//   return (
-//     <View style={styles.container}>
-//       <MapView
-//         style={styles.map}
-//         initialRegion={{
-//           latitude: 11.9139,
-//           longitude: 79.8145,
-//           latitudeDelta: 0.05,
-//           longitudeDelta: 0.05,
-//         }}
-//       >
-//         <Marker
-//           coordinate={{
-//             latitude: 11.9139,
-//             longitude: 79.8145,
-//           }}
-//           title="My Location"
-//           description="Puducherry"
-//         />
-//       </MapView>
-//     </View>
-//   );
-// };
-
-// const styles = StyleSheet.create({
-//   container: {
-//     flex: 1,
-//   },
-//   map: {
-//     flex: 1,
-//   },
-// });
-
-// export default MapScreen;

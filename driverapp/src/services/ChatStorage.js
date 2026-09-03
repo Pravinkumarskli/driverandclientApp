@@ -1,7 +1,4 @@
-/**
- * ChatStorage.js — Async persistent chat history using AsyncStorage.
- * Key pattern: `chat_messages_<conversationId>`
- */
+ 
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
 const KEY_PREFIX = "chat_messages_";

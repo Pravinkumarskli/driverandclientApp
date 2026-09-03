@@ -5,7 +5,7 @@ import WebRTCService from "../services/WebRTCService";
 import SocketService from "../services/SocketService";
 
 const CustomerAnswerCallScreen = ({ route, navigation }) => {
-  const { callerId, callerName } = route.params || {};
+  const { callerId, callerName, userId = "customer_101" } = route.params || {};
 
   const [status, setStatus] = useState("Connected");
   const [seconds, setSeconds] = useState(0);
@@ -97,7 +97,7 @@ const CustomerAnswerCallScreen = ({ route, navigation }) => {
         onPress: async () => {
           try {
             SocketService.endCall({
-              senderId: "driver_201",
+              senderId: userId || SocketService.currentUserId || "customer_101",
               receiverId: callerId,
             });
 

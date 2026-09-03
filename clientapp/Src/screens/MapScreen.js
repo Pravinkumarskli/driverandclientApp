@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from "react";
 import {
   Alert,
   SafeAreaView,
@@ -7,16 +7,17 @@ import {
   Text,
   TouchableOpacity,
   View,
-} from 'react-native';
+} from "react-native";
 import MapView, {
   Marker,
   Polyline,
   PROVIDER_GOOGLE,
   AnimatedRegion,
   MarkerAnimated,
-} from 'react-native-maps';
+} from "react-native-maps";
+import Geolocation from "@react-native-community/geolocation";
 
-import SocketService from '../services/SocketService';
+import SocketService from "../services/SocketService";
 
 // Route coordinates connecting Kalapet Beach to Pondicherry White Town
 const ROUTE_COORDINATES = [
@@ -30,28 +31,27 @@ const ROUTE_COORDINATES = [
   { latitude: 11.9416, longitude: 79.8083 },
 ];
 
-const TOTAL_STEPS = 80;
-
-export default function DriverTrackingScreen({ route, navigation }) {
+export default function MapScreen({ route, navigation }) {
   const {
-    driverId = 'driver_201',
-    customerId = 'customer_101',
-    customerName = 'Customer 101',
-  } = (route && route.params) || {};
+    customerId = "customer_101",
+    driverId = "driver_201",
+    driverName = "Arun",
+  } = route.params || {};
 
   const mapRef = useRef(null);
-  const [isBroadcasting, setIsBroadcasting] = useState(true);
-  const [broadcastCount, setBroadcastCount] = useState(0);
-  const [hasArrived, setHasArrived] = useState(false);
 
-  const isBroadcastingRef = useRef(true);
-  const stepRef = useRef(0);
-
-  const [driverCoord, setDriverCoord] = useState({
+  const [driverLocation, setDriverLocation] = useState({
+    driverId: driverId,
     latitude: 12.0125,
     longitude: 79.8550,
+    accuracy: 5,
+    speed: 36,
+    heading: 90,
+    timestamp: Date.now(),
   });
 
+  // AnimatedRegion drives the marker's smooth glide across updates.
+  // Kept in a ref so the same instance persists across re-renders.
   const animatedDriverCoord = useRef(
     new AnimatedRegion({
       latitude: 12.0125,
@@ -61,85 +61,81 @@ export default function DriverTrackingScreen({ route, navigation }) {
     })
   ).current;
 
-  const pickupCoord = ROUTE_COORDINATES[0];
-  const dropCoord = ROUTE_COORDINATES[ROUTE_COORDINATES.length - 1];
-  const [speed, setSpeed] = useState(38);
+  const [customerLocation, setCustomerLocation] = useState({
+    latitude: 11.9416,
+    longitude: 79.8083,
+  });
+
+  const pickupLocation = ROUTE_COORDINATES[0];
+  const dropLocation = ROUTE_COORDINATES[ROUTE_COORDINATES.length - 1];
+
+  const [etaMinutes, setEtaMinutes] = useState(3);
+  const [tipAdded, setTipAdded] = useState(false);
 
   useEffect(() => {
-    isBroadcastingRef.current = isBroadcasting;
-  }, [isBroadcasting]);
+    console.log("CUSTOMER START TRACKING FOR:", customerId, "->", driverId);
+    SocketService.connect(customerId);
+    SocketService.startTracking(customerId, driverId);
 
-  useEffect(() => {
-    SocketService.connect(driverId);
+    // Fetch customer's live GPS for Home marker
+    Geolocation.getCurrentPosition(
+      (pos) => {
+        const { latitude, longitude } = pos.coords;
+        setCustomerLocation({ latitude, longitude });
+      },
+      (err) => console.log("MapScreen Geolocation error:", err?.message || err),
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 10000 }
+    );
 
-    // Initial broadcast
-    SocketService.sendLocation({
-      driverId,
-      latitude: driverCoord.latitude,
-      longitude: driverCoord.longitude,
-      accuracy: 5,
-      speed: 38,
-      heading: 90,
-      timestamp: Date.now(),
-    });
-    setBroadcastCount(1);
+    const handleDriverLocation = (data) => {
+      const latitude = Number(data.latitude);
+      const longitude = Number(data.longitude);
 
-    const interval = setInterval(() => {
-      if (!isBroadcastingRef.current) return;
-
-      if (stepRef.current >= TOTAL_STEPS) {
-        clearInterval(interval);
-        setHasArrived(true);
+      if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
         return;
       }
 
-      stepRef.current += 1;
-      const step = stepRef.current;
+      console.log("CUSTOMER RECEIVED GPS LOCATION UPDATE:", data);
 
-      const latDelta = (dropCoord.latitude - pickupCoord.latitude) * (step / TOTAL_STEPS);
-      const lngDelta = (dropCoord.longitude - pickupCoord.longitude) * (step / TOTAL_STEPS);
+      setDriverLocation((prev) => ({ ...prev, ...data, latitude, longitude }));
 
-      const nextLat = pickupCoord.latitude + latDelta;
-      const nextLng = pickupCoord.longitude + lngDelta;
-      const simulatedSpeed = 35 + (step % 10);
-
-      setDriverCoord({ latitude: nextLat, longitude: nextLng });
-      setSpeed(simulatedSpeed);
-      setBroadcastCount((prev) => prev + 1);
-
-      // Smoothly animate the driver vehicle marker to the new coordinates
+      // Glide the marker to the new coordinate over 1s instead of jumping
       animatedDriverCoord
         .timing({
-          latitude: nextLat,
-          longitude: nextLng,
+          latitude,
+          longitude,
           duration: 1000,
-          useNativeDriver: false,
+          useNativeDriver: false, // AnimatedRegion doesn't support native driver
         })
         .start();
 
-      SocketService.sendLocation({
-        driverId,
-        latitude: nextLat,
-        longitude: nextLng,
-        accuracy: 4,
-        speed: simulatedSpeed,
-        heading: 90,
-        timestamp: Date.now(),
-      });
-    }, 2000);
+      if (mapRef.current) {
+        mapRef.current.animateToRegion(
+          {
+            latitude: latitude - 0.012,
+            longitude: longitude,
+            latitudeDelta: 0.06,
+            longitudeDelta: 0.06,
+          },
+          1000,
+        );
+      }
+    };
+
+    SocketService.onDriverLocation(handleDriverLocation);
 
     return () => {
-      clearInterval(interval);
-      SocketService.disconnect?.();
+      SocketService.removeDriverLocationListener();
+      SocketService.stopTracking(customerId);
     };
-  }, [driverId, pickupCoord.latitude, pickupCoord.longitude, dropCoord.latitude, dropCoord.longitude]);
+  }, [customerId, driverId]);
 
   const recenterMap = () => {
     if (mapRef.current) {
       mapRef.current.animateToRegion(
         {
-          latitude: driverCoord.latitude - 0.012,
-          longitude: driverCoord.longitude,
+          latitude: driverLocation.latitude - 0.012,
+          longitude: driverLocation.longitude,
           latitudeDelta: 0.05,
           longitudeDelta: 0.05,
         },
@@ -148,60 +144,56 @@ export default function DriverTrackingScreen({ route, navigation }) {
     }
   };
 
-  const toggleBroadcast = () => {
-    const next = !isBroadcasting;
-    setIsBroadcasting(next);
-    Alert.alert(
-      next ? 'Broadcast Resumed' : 'Broadcast Paused',
-      next
-        ? 'GPS location is now broadcasting live to passenger.'
-        : 'GPS broadcasting paused.',
-    );
-  };
-
   const openChat = () => {
-    navigation.navigate('DriverChat', {
-      userId: driverId,
-      receiverId: customerId,
-      receiverName: customerName,
+    navigation.navigate("CustomerChat", {
+      userId: customerId,
+      receiverId: driverId,
+      receiverName: driverName,
     });
   };
 
   const openCall = () => {
-    navigation.navigate('DriverCallScreen', {
-      userId: driverId,
-      receiverId: customerId,
-      receiverName: customerName,
+    navigation.navigate("CustomerCallScreen", {
+      userId: customerId,
+      receiverId: driverId,
+      receiverName: driverName,
     });
   };
 
-  const handleTripDetails = () => {
+  const handleAddTip = () => {
+    setTipAdded((prev) => !prev);
     Alert.alert(
-      'Trip Dispatch Summary',
-      `Customer: ${customerName}\nPickup: Kalapet Beach Road\nDrop: Pondicherry White Town\nFare: 350 INR\nStatus: ${
-        hasArrived ? 'Arrived at destination' : 'GPS Live Dispatched'
-      }`,
+      tipAdded ? "Tip Removed" : "Tip Added",
+      tipAdded ? "Tip removed from current ride." : "50 INR tip added for the driver.",
     );
   };
 
-  const handleCompleteTrip = () => {
-    Alert.alert('Arrived at Destination', 'Confirm completion of current trip?', [
-      { text: 'Cancel', style: 'cancel' },
+  const handleOrderDetails = () => {
+    Alert.alert(
+      "Ride Details",
+      `Driver: ${driverName}\nVehicle: Prime Sedan (TN 01 AB 1234)\nPickup: Kalapet Beach Road\nDrop: Pondicherry White Town\nFare: ${tipAdded ? "400 INR (incl. 50 tip)" : "350 INR"}`,
+    );
+  };
+
+  const handleCancelRide = () => {
+    Alert.alert("Cancel Ride", "Are you sure you want to cancel this ride?", [
+      { text: "No", style: "cancel" },
       {
-        text: 'Complete Trip',
-        onPress: () => {
-          Alert.alert('Success', 'Trip completed successfully! Fare: 350 INR collected.');
-          navigation.goBack();
-        },
+        text: "Yes, Cancel",
+        style: "destructive",
+        onPress: () => navigation.goBack(),
       },
     ]);
   };
 
   return (
     <View style={{ flex: 1 }}>
-      <StatusBar barStyle="dark-content" backgroundColor="transparent" translucent />
+      <StatusBar
+        barStyle="dark-content"
+        backgroundColor="transparent"
+        translucent
+      />
 
-      {/* Floating Top Header Actions */}
       <SafeAreaView style={styles.topSafeArea}>
         <View style={styles.header}>
           <TouchableOpacity
@@ -216,8 +208,8 @@ export default function DriverTrackingScreen({ route, navigation }) {
             <TouchableOpacity
               onPress={() =>
                 Alert.alert(
-                  'Driver Support',
-                  'Contacting 24/7 Driver Dispatch Helpline: +91 1800 987 6543',
+                  "Help & Support",
+                  "Contacting 24/7 cab dispatch support. Helpline: +91 1800 123 4567",
                 )
               }
               activeOpacity={0.8}
@@ -238,88 +230,78 @@ export default function DriverTrackingScreen({ route, navigation }) {
         </View>
       </SafeAreaView>
 
-      {/* Full-screen MapView with Google Provider */}
       <MapView
         ref={mapRef}
         provider={PROVIDER_GOOGLE}
         style={styles.map}
         initialRegion={{
-          latitude: driverCoord.latitude - 0.015,
-          longitude: driverCoord.longitude,
+          latitude: driverLocation.latitude - 0.015,
+          longitude: driverLocation.longitude,
           latitudeDelta: 0.08,
           longitudeDelta: 0.08,
         }}
-        onMapReady={recenterMap}
         zoomEnabled={true}
         scrollEnabled={true}
       >
-        {/* Origin / Pickup Marker */}
-        <Marker coordinate={pickupCoord} title="Pickup Point" description="Kalapet Beach Road">
+        <Marker coordinate={pickupLocation} title="Pickup Point" description="Kalapet Beach Road">
           <View style={[styles.marker, styles.markerPickup]}>
             <Text style={styles.markerIcon}>📍</Text>
           </View>
         </Marker>
 
-        {/* Destination / Drop Marker */}
-        <Marker coordinate={dropCoord} title="Drop Point" description="Pondicherry White Town">
+        <Marker
+          coordinate={customerLocation}
+          title="Destination (My Location / Home)"
+          description={`Lat: ${customerLocation.latitude?.toFixed(4)}, Lng: ${customerLocation.longitude?.toFixed(4)}`}
+        >
           <View style={[styles.marker, styles.markerDrop]}>
             <Text style={styles.markerIcon}>🏠</Text>
           </View>
         </Marker>
 
-        {/* Real-time Driver Location Marker with Smooth Animation */}
+        {/* Driver marker — now uses MarkerAnimated + AnimatedRegion,
+            so it glides smoothly instead of jumping on each GPS update */}
         <MarkerAnimated
           coordinate={animatedDriverCoord}
-          title="Your Vehicle Location"
-          description={`Speed: ${speed} km/h • Broadcast Active`}
+          title={`Driver: ${driverName}`}
+          description={`Speed: ${driverLocation.speed || 36} km/h`}
         >
           <View style={[styles.marker, styles.markerDriver]}>
             <Text style={styles.markerIcon}>🚗</Text>
           </View>
         </MarkerAnimated>
 
-        {/* Route Polyline */}
-        <Polyline coordinates={ROUTE_COORDINATES} strokeColor="#0F172A" strokeWidth={4} />
+        <Polyline
+          coordinates={ROUTE_COORDINATES}
+          strokeColor="#0F172A"
+          strokeWidth={4}
+        />
       </MapView>
 
-      {/* Bottom Sheet Section */}
       <SafeAreaView style={styles.sheet}>
-        {/* Sheet Header */}
         <View style={styles.sheetHeader}>
-          <Text style={styles.sheetTitle}>
-            {hasArrived ? 'Arrived at destination' : 'Trip in progress'}
-          </Text>
+          <Text style={styles.sheetTitle}>Cab is coming soon</Text>
           <Text style={styles.sheetSubtitle}>
-            {hasArrived ? 'Ready to complete trip' : 'En route to drop-off'}
-            <Text style={styles.speedBadge}>{` • ${speed} km/h`}</Text>
-            <Text style={styles.broadcastTag}>
-              {isBroadcasting ? ' • 📡 LIVE GPS' : ' • ⏸️ PAUSED'}
-            </Text>
+            Arrives in
+            <Text style={styles.boldText}>{` ${etaMinutes} minutes`}</Text>
+            <Text style={styles.speedBadge}>{` • ${driverLocation.speed || 36} km/h`}</Text>
           </Text>
         </View>
 
-        {/* Passenger Section with Quick Actions */}
         <View style={styles.sheetSection}>
           <View style={styles.sectionInfo}>
-            <Text style={styles.sectionTitle}>Passenger</Text>
-            <Text style={styles.sectionSubtitle}>{customerName} • +91 98765 43210</Text>
+            <Text style={styles.sectionTitle}>Driver</Text>
+            <Text style={styles.sectionSubtitle}>{driverName} • Prime Sedan</Text>
           </View>
 
-          {/* Broadcast Toggle Pill */}
-          <TouchableOpacity onPress={toggleBroadcast} activeOpacity={0.8}>
-            <View style={[styles.btnSm, isBroadcasting ? styles.btnSmActive : styles.btnSmInactive]}>
-              <Text
-                style={[
-                  styles.btnSmText,
-                  isBroadcasting ? styles.btnSmTextActive : styles.btnSmTextInactive,
-                ]}
-              >
-                {isBroadcasting ? 'GPS ON' : 'PAUSED'}
+          <TouchableOpacity onPress={handleAddTip} activeOpacity={0.8}>
+            <View style={[styles.btnSm, tipAdded && styles.btnSmActive]}>
+              <Text style={[styles.btnSmText, tipAdded && styles.btnSmTextActive]}>
+                {tipAdded ? "✓ +50 Tip" : "+ Add tip"}
               </Text>
             </View>
           </TouchableOpacity>
 
-          {/* Phone Call Button */}
           <TouchableOpacity
             onPress={openCall}
             style={[styles.btnSm, styles.btnIconOnly, styles.callBtn]}
@@ -328,7 +310,6 @@ export default function DriverTrackingScreen({ route, navigation }) {
             <Text style={styles.actionEmoji}>📞</Text>
           </TouchableOpacity>
 
-          {/* Message / Chat Button */}
           <TouchableOpacity
             onPress={openChat}
             style={[styles.btnSm, styles.btnIconOnly, styles.chatBtn]}
@@ -338,31 +319,33 @@ export default function DriverTrackingScreen({ route, navigation }) {
           </TouchableOpacity>
         </View>
 
-        {/* Route / Trip Section */}
         <View style={styles.sheetSection}>
           <View style={styles.sectionInfo}>
-            <Text style={styles.sectionTitle}>Drop-off Location</Text>
+            <Text style={styles.sectionTitle}>Destination</Text>
             <Text style={styles.sectionSubtitle} numberOfLines={1}>
-              Pondicherry White Town • Fare: 350 INR
+              Pondicherry White Town • 350 INR
             </Text>
           </View>
 
-          <TouchableOpacity onPress={handleTripDetails} style={styles.btnSm} activeOpacity={0.8}>
-            <Text style={styles.btnSmText}>Details</Text>
+          <TouchableOpacity
+            onPress={handleOrderDetails}
+            style={styles.btnSm}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.btnSmText}>Route</Text>
           </TouchableOpacity>
         </View>
 
-        {/* Section Footer: Primary & Secondary Action Buttons */}
         <View style={styles.sectionFooter}>
-          <TouchableOpacity onPress={handleCompleteTrip} activeOpacity={0.8}>
+          <TouchableOpacity onPress={handleOrderDetails} activeOpacity={0.8}>
             <View style={styles.btnPrimary}>
-              <Text style={styles.btnPrimaryText}>Arrived & Complete Trip</Text>
+              <Text style={styles.btnPrimaryText}>View Ride Details</Text>
             </View>
           </TouchableOpacity>
 
-          <TouchableOpacity onPress={() => navigation.goBack()} activeOpacity={0.8}>
+          <TouchableOpacity onPress={handleCancelRide} activeOpacity={0.8}>
             <View style={styles.btnEmpty}>
-              <Text style={styles.btnEmptyText}>Minimize Map</Text>
+              <Text style={styles.btnEmptyText}>Cancel Ride</Text>
             </View>
           </TouchableOpacity>
         </View>
@@ -455,9 +438,9 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     paddingVertical: 14,
     paddingHorizontal: 16,
-    backgroundColor: "#16A34A",
+    backgroundColor: "#DC2626",
     elevation: 3,
-    shadowColor: "#16A34A",
+    shadowColor: "#DC2626",
     shadowOpacity: 0.3,
     shadowRadius: 6,
     shadowOffset: { width: 0, height: 2 },

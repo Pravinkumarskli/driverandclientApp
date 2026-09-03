@@ -10,6 +10,7 @@ import DriverTrackingScreen from "../screens/DriverTrackingScreen";
 import IncomingCallScreen from "../screens/IncomingCallScreen";
 import VoiceCallScreen from "../screens/VoiceCallScreen";
 import DriverCallScreen from "../screens/DriverCallScreen";
+import MapScreen from "../screens/MapScreen";
 
 const Stack = createNativeStackNavigator();
 
@@ -76,6 +77,13 @@ export default function AppNavigator() {
         <Stack.Screen
           name="DriverCallScreen"
           component={DriverCallScreen}
+          options={{
+            headerShown: false,
+          }}
+        />
+        <Stack.Screen
+          name="Map"
+          component={MapScreen}
           options={{
             headerShown: false,
           }}

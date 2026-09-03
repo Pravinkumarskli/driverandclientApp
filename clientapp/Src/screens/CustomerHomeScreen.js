@@ -12,6 +12,7 @@ import {
 import SocketService from "../services/SocketService";
 import NativeSocketService from "../services/NativeSocketService";
 import { clearUserSession } from "../services/AuthSession";
+import LocationTracker from './LocationTraker';
 import { WS_URL } from "../config/AppConfig";
 
 
@@ -50,9 +51,18 @@ export default function CustomerHomeScreen({ route, navigation }) {
     SocketService.connect(userId);
     // Service is already started from LoginScreen. Don't call start() again.
 
-    // Check if opened via initial notification
-    NativeSocketService.getInitialNotificationData().then((data) => {
-      if (data?.senderId) {
+    const handleNotificationRoute = (data) => {
+      if (!data) return;
+      console.log("🔔 [CUSTOMER NOTIFICATION OPENED]:", data);
+      if (data.action === "INCOMING_CALL" || data.callerId) {
+        navigation.navigate("CustomerIncomingCall", {
+          callerId: data.callerId || data.senderId,
+          callerName: data.callerName || data.receiverName || "Driver",
+          receiverId: userId,
+          receiverName: userName,
+          offer: data.offer || null,
+        });
+      } else if (data.action === "OPEN_CHAT" || data.senderId) {
         navigation.navigate("CustomerChat", {
           userId: userId,
           receiverId: data.senderId,
@@ -60,19 +70,15 @@ export default function CustomerHomeScreen({ route, navigation }) {
           messageId: data.messageId || "",
         });
       }
-    });
+    };
+
+    // Check if opened via initial notification (App was killed)
+    NativeSocketService.getInitialNotificationData()
+      .then(handleNotificationRoute)
+      .catch((err) => console.warn("Initial notification check error:", err));
 
     // Handle background notification clicks while app was open
-    const unsubscribeNotification = NativeSocketService.onNotificationOpened((data) => {
-      if (data?.senderId) {
-        navigation.navigate("CustomerChat", {
-          userId: userId,
-          receiverId: data.senderId,
-          receiverName: data.receiverName || "Driver",
-          messageId: data.messageId || "",
-        });
-      }
-    });
+    const unsubscribeNotification = NativeSocketService.onNotificationOpened(handleNotificationRoute);
 
     SocketService.onDriverList((list) => {
       if (Array.isArray(list) && list.length > 0) {
@@ -106,8 +112,16 @@ export default function CustomerHomeScreen({ route, navigation }) {
     });
   };
 
+  // const openTracking = (driver) => {
+  //   navigation.navigate("CustomerTracking", {
+  //     customerId: userId,
+  //     driverId: driver.id,
+  //     driverName: driver.name,
+  //   });
+  // };
+
   const openTracking = (driver) => {
-    navigation.navigate("CustomerTracking", {
+    navigation.navigate("Map", {
       customerId: userId,
       driverId: driver.id,
       driverName: driver.name,
@@ -274,6 +288,8 @@ export default function CustomerHomeScreen({ route, navigation }) {
             }
           />
         </View>
+        <LocationTracker/>
+
       </View>
     </SafeAreaView>
   );

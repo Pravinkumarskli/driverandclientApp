@@ -54,14 +54,53 @@ export default function CustomerChatScreen({ route, navigation }) {
     });
   }, []);
 
-  // ─── Load messages from AsyncStorage on screen open ──────────────────────
+  // ─── Load messages from AsyncStorage + fetch from server on screen open ───
   useEffect(() => {
-    loadMessages(conversationId).then((stored) => {
-      if (stored.length > 0) {
+    let isCancelled = false;
+
+    const loadAndSync = async () => {
+      // 1. Load local messages first (instant)
+      const stored = await loadMessages(conversationId);
+      if (!isCancelled && stored.length > 0) {
         setMessages(stored);
       }
-    });
-  }, [conversationId]);
+
+      // 2. Fetch server history (catches messages sent while app was closed)
+      try {
+        const serverMessages = await NativeSocketService.getMessages(userId, receiverId);
+        if (!isCancelled && Array.isArray(serverMessages) && serverMessages.length > 0) {
+          setMessages((prev) => {
+            // Build a set of existing IDs for fast lookup
+            const existingIds = new Set(
+              prev.map((m) => m.messageId || m.id).filter(Boolean),
+            );
+            // Find new messages from server not in local
+            const newMsgs = serverMessages.filter((m) => {
+              const msgId = m.messageId || m.id;
+              return msgId && !existingIds.has(msgId);
+            });
+            if (newMsgs.length === 0) return prev;
+
+            console.log(`[CustomerChat] Synced ${newMsgs.length} new message(s) from server`);
+            const merged = [...prev, ...newMsgs].sort(
+              (a, b) => (a.timestamp || 0) - (b.timestamp || 0),
+            );
+            // Persist merged messages to AsyncStorage
+            newMsgs.forEach((msg) => saveMessage(conversationId, msg));
+            return merged;
+          });
+        }
+      } catch (err) {
+        console.warn("[CustomerChat] Server message sync error:", err);
+      }
+    };
+
+    loadAndSync();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [conversationId, userId, receiverId]);
 
   // ─── Native socket receive message listener ───────────────────────────────
   useEffect(() => {
@@ -72,12 +111,12 @@ export default function CustomerChatScreen({ route, navigation }) {
       console.log("[CustomerChat] raw event received:", JSON.stringify(data).slice(0, 120));
 
       if (data?.type === "receiveMessage" || data?.type === "chat") {
-        // Only handle messages for this conversation
-        if (
+        const isThisConv =
           data.conversationId === conversationId ||
-          data.senderId === receiverId ||
-          data.receiverId === userId
-        ) {
+          (data.senderId === receiverId && data.receiverId === userId) ||
+          (data.senderId === userId && data.receiverId === receiverId);
+
+        if (isThisConv) {
           const msg = { ...data, status: "delivered" };
           mergeMessage(msg);
           // Persist to AsyncStorage asynchronously

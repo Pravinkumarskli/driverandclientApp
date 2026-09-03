@@ -226,6 +226,31 @@ wss.on('connection', (ws, req) => {
         return;
       }
 
+      // ── GET MESSAGES (history fetch from native WS) ──────
+      if (type === 'getMessages') {
+        const senderId = data.userId || authUserId;
+        const otherUserId = data.otherUserId || data.receiverId;
+        if (!senderId || !otherUserId) {
+          ws.send(JSON.stringify({ type: 'getMessagesResponse', success: false, messages: [] }));
+          return;
+        }
+        const conversationId = getConversationId(senderId, otherUserId);
+        const msgs = conversationHistory.get(conversationId) || [];
+        console.log(`\n📋 GET MESSAGES (Native WS) ─────────────────────────────`);
+        console.log(`   User      : ${getUserLabel(senderId)}`);
+        console.log(`   Other     : ${getUserLabel(otherUserId)}`);
+        console.log(`   Conv ID   : ${conversationId}`);
+        console.log(`   Messages  : ${msgs.length}`);
+        console.log(`${'─'.repeat(58)}\n`);
+        ws.send(JSON.stringify({
+          type: 'getMessagesResponse',
+          success: true,
+          conversationId,
+          messages: msgs,
+        }));
+        return;
+      }
+
       // ── GPS LOCATION ──────────────────────────────────────
       if (type === 'sendLocation' || type === 'driverLocation') {
         const driverId = data.driverId || authUserId;
@@ -239,10 +264,51 @@ wss.on('connection', (ws, req) => {
           timestamp: data.timestamp || Date.now(),
         };
         driverLocations.set(driverId, loc);
+
+        console.log(`\n📍 [NATIVE WS LOCATION] Driver: ${driverId} ──────────────────────`);
+        console.log(`   Latitude  : ${loc.latitude}`);
+        console.log(`   Longitude : ${loc.longitude}`);
+        console.log(`   Speed     : ${loc.speed} | Accuracy: ±${loc.accuracy}m | Heading: ${loc.heading}°`);
+        console.log(`   Time      : ${now()}`);
+        console.log(`${'─'.repeat(58)}\n`);
+
         for (const [customerId, trackedDriverId] of activeTracking.entries()) {
           if (trackedDriverId === driverId) {
             emitToUser(customerId, 'driverLocationUpdate', loc);
           }
+        }
+        // Broadcast to all connected clients
+        io.emit('driverLocationUpdate', loc);
+        io.emit('driverLocation', loc);
+        return;
+      }
+
+      // ── CALLING EVENTS (NATIVE WS) ────────────────────────
+      if (type === 'callUser') {
+        const receiverId = data.receiverId || data.target;
+        const callerId = data.callerId || data.senderId || authUserId;
+        const callerName = data.callerName || data.senderName || userRegistry.get(callerId)?.name || callerId;
+        console.log(`\n📞 [CALL USER (Native WS)] ${callerId} ➔ ${receiverId} (Caller: ${callerName})`);
+        emitToUser(receiverId, 'incomingCall', {
+          ...data,
+          type: 'incomingCall',
+          callerId,
+          senderId: callerId,
+          receiverId,
+          callerName,
+        });
+        return;
+      }
+
+      if (type === 'endCall' || type === 'rejectCall' || type === 'callEnded') {
+        const otherParty = data.receiverId || data.callerId || data.target;
+        console.log(`\n🛑 [END/REJECT CALL (Native WS)] ➔ ${otherParty}`);
+        if (otherParty) {
+          emitToUser(otherParty, 'callEnded', {
+            ...data,
+            type: 'callEnded',
+            senderId: authUserId,
+          });
         }
         return;
       }
@@ -392,56 +458,121 @@ io.on('connection', (socket) => {
       timestamp: data.timestamp || Date.now(),
     };
     driverLocations.set(driverId, loc);
+
+    console.log(`\n📍 [SOCKET.IO LOCATION] Driver: ${driverId} ─────────────────────`);
+    console.log(`   Latitude  : ${loc.latitude}`);
+    console.log(`   Longitude : ${loc.longitude}`);
+    console.log(`   Speed     : ${loc.speed} | Accuracy: ±${loc.accuracy}m | Heading: ${loc.heading}°`);
+    console.log(`   Time      : ${now()}`);
+    console.log(`${'─'.repeat(58)}\n`);
+
     for (const [customerId, trackedDriverId] of activeTracking.entries()) {
       if (trackedDriverId === driverId) emitToUser(customerId, 'driverLocationUpdate', loc);
     }
+    io.emit('driverLocationUpdate', loc);
+    io.emit('driverLocation', loc);
   });
 
-  // ─────────────────────────────────────────────────────────
-  // 📞 WEBRTC VOICE CALL SIGNALING (WHATSAPP-STYLE TWO-WAY)
-  // ─────────────────────────────────────────────────────────
+  socket.on('sendLocation', (data) => {
+    const driverId = data.driverId || socketUserId;
+    if (!driverId) return;
+    const loc = {
+      driverId,
+      latitude:  Number(data.latitude),
+      longitude: Number(data.longitude),
+      accuracy:  Number(data.accuracy || 5),
+      speed:     Number(data.speed || 0),
+      heading:   Number(data.heading || 0),
+      timestamp: data.timestamp || Date.now(),
+    };
+    driverLocations.set(driverId, loc);
+
+    console.log(`\n📍 [SOCKET.IO LOCATION] Driver: ${driverId} ─────────────────────`);
+    console.log(`   Latitude  : ${loc.latitude}`);
+    console.log(`   Longitude : ${loc.longitude}`);
+    console.log(`   Speed     : ${loc.speed} | Accuracy: ±${loc.accuracy}m | Heading: ${loc.heading}°`);
+    console.log(`   Time      : ${now()}`);
+    console.log(`${'─'.repeat(58)}\n`);
+
+    for (const [customerId, trackedDriverId] of activeTracking.entries()) {
+      if (trackedDriverId === driverId) emitToUser(customerId, 'driverLocationUpdate', loc);
+    }
+    io.emit('driverLocationUpdate', loc);
+    io.emit('driverLocation', loc);
+  });
+
   socket.on('callUser', (data) => {
     const receiverId = data.receiverId || data.target;
     const callerId = data.callerId || data.senderId || socketUserId;
-    console.log(`\n📞 [CALL USER] ${callerId} ➔ ${receiverId} (Caller: ${data.callerName || data.senderName || 'Unknown'})`);
+    const callerName = data.callerName || data.senderName || userRegistry.get(callerId)?.name || callerId;
+    console.log(`\n📞 [CALL USER] ${callerId} ➔ ${receiverId} (Caller: ${callerName})`);
     emitToUser(receiverId, 'incomingCall', {
       ...data,
+      type: 'incomingCall',
       callerId,
       senderId: callerId,
       receiverId,
+      callerName,
     });
   });
 
   socket.on('acceptCall', (data) => {
-    // When receiver accepts, notify the original caller
-    const targetCallerId = data.callerId || data.receiverId;
-    const answeringUserId = data.senderId || socketUserId;
+    let targetCallerId;
+    let answeringUserId;
+    if (typeof data === 'string') {
+      targetCallerId = data;
+      answeringUserId = socketUserId;
+    } else if (typeof data === 'object' && data !== null) {
+      targetCallerId = data.callerId || data.receiverId || data.target;
+      answeringUserId = data.senderId || socketUserId;
+    }
     console.log(`\n✅ [CALL ACCEPTED] Call accepted by ${answeringUserId} ➔ Notifying caller: ${targetCallerId}`);
-    emitToUser(targetCallerId, 'callAccepted', {
-      ...data,
-      callerId: targetCallerId,
-      senderId: answeringUserId,
-    });
+    if (targetCallerId) {
+      emitToUser(targetCallerId, 'callAccepted', {
+        ...data,
+        callerId: targetCallerId,
+        senderId: answeringUserId,
+      });
+    }
   });
 
   socket.on('rejectCall', (data) => {
-    const targetCallerId = data.callerId || data.receiverId;
-    const rejectingUserId = data.senderId || socketUserId;
+    let targetCallerId;
+    let rejectingUserId;
+    if (typeof data === 'string') {
+      targetCallerId = data;
+      rejectingUserId = socketUserId;
+    } else if (typeof data === 'object' && data !== null) {
+      targetCallerId = data.callerId || data.receiverId || data.target;
+      rejectingUserId = data.senderId || socketUserId;
+    }
     console.log(`\n❌ [CALL REJECTED] Call declined by ${rejectingUserId} ➔ Notifying: ${targetCallerId}`);
-    emitToUser(targetCallerId, 'callRejected', {
-      ...data,
-      callerId: targetCallerId,
-      senderId: rejectingUserId,
-    });
+    if (targetCallerId) {
+      emitToUser(targetCallerId, 'callRejected', {
+        ...data,
+        callerId: targetCallerId,
+        senderId: rejectingUserId,
+      });
+    }
   });
 
   socket.on('endCall', (data) => {
-    const otherParty = data.receiverId || data.callerId || data.target;
-    console.log(`\n🛑 [CALL ENDED] Call ended by ${data.senderId || socketUserId} ➔ Notifying: ${otherParty}`);
-    emitToUser(otherParty, 'callEnded', {
-      ...data,
-      senderId: data.senderId || socketUserId,
-    });
+    let otherParty;
+    let endingUserId;
+    if (typeof data === 'string') {
+      otherParty = data;
+      endingUserId = socketUserId;
+    } else if (typeof data === 'object' && data !== null) {
+      otherParty = data.receiverId || data.callerId || data.target;
+      endingUserId = data.senderId || socketUserId;
+    }
+    console.log(`\n🛑 [CALL ENDED] Call ended by ${endingUserId} ➔ Notifying: ${otherParty}`);
+    if (otherParty) {
+      emitToUser(otherParty, 'callEnded', {
+        ...data,
+        senderId: endingUserId,
+      });
+    }
   });
 
   // WebRTC SDP Offer (Support both 'offer' and 'webrtcOffer')
@@ -489,6 +620,16 @@ io.on('connection', (socket) => {
 // ─────────────────────────────────────────────────────────────
 // 3. HTTP API
 // ─────────────────────────────────────────────────────────────
+app.get('/api/messages', (req, res) => {
+  const { userId, otherUserId, conversationId: convQuery } = req.query;
+  const conversationId = convQuery || (userId && otherUserId ? getConversationId(userId, otherUserId) : null);
+  if (!conversationId) {
+    return res.status(400).json({ success: false, messages: [], error: 'Missing userId/otherUserId or conversationId' });
+  }
+  const msgs = conversationHistory.get(conversationId) || [];
+  res.json({ success: true, conversationId, messages: msgs });
+});
+
 app.get('/api/health', (req, res) => {
   const onlineUsers = [];
   for (const [userId, info] of userRegistry.entries()) {
