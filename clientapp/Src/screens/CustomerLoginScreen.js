@@ -55,8 +55,7 @@ export default function CustomerLoginScreen({ navigation }) {
             console.warn("[AutoLogin] Native start error:", e),
           );
           SocketService.connect(savedSession.userId);
-          setIsConnecting(false);
-
+          
           // Check if there was a launch notification that opened the app
           const initialNotif = await NativeSocketService.getInitialNotificationData();
           if (initialNotif && isMounted) {
@@ -95,6 +94,7 @@ export default function CustomerLoginScreen({ navigation }) {
             }
           }
 
+          if (!isMounted) return;
           navigation.replace("CustomerHomeScreen", {
             userId: savedSession.userId,
             userName: savedSession.userName || savedSession.userId,
@@ -135,19 +135,23 @@ export default function CustomerLoginScreen({ navigation }) {
       await saveUserSession({
         userId: finalId,
         userName: finalName,
+        userRole: "Customer",
       });
 
-      // Start Native Android OkHttp WebSocket Foreground Service & await registration
-      await NativeSocketService.start(WS_URL, finalId, "client", 8000);
-
-      // Connect Socket.io for WebRTC calls
+      // Start socket background service
+      NativeSocketService.start(WS_URL, finalId, "client", 5000).catch((e) =>
+        console.warn("[ManualLogin] Native start error:", e),
+      );
       SocketService.connect(finalId);
 
       setIsConnecting(false);
 
+      // Check if there was a launch notification that opened the app
       const initialNotif = await NativeSocketService.getInitialNotificationData();
       if (initialNotif) {
+        console.log("🔔 [LOGIN CUSTOMER] Routing from launch notification:", initialNotif);
         await NativeSocketService.clearInitialNotificationData();
+
         if (initialNotif.action === "INCOMING_CALL" || initialNotif.callerId) {
           let parsedOffer = null;
           if (initialNotif.offer) {

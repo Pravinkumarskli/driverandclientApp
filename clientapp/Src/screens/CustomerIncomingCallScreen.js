@@ -71,6 +71,8 @@ export default function CustomerIncomingCallScreen({ route, navigation }) {
   }, []);
 
   const acceptCall = async () => {
+    if (accepting) return;
+    setAccepting(true);
     try {
       NativeSocketService.cancelCallNotification?.();
       NativeSocketService.clearInitialNotification?.();
@@ -89,6 +91,14 @@ export default function CustomerIncomingCallScreen({ route, navigation }) {
       console.log("================================");
 
       setStatus("Connecting...");
+
+      // Notify the caller before negotiating media. The caller's UI listens for
+      // this event and otherwise remains stuck on "Calling".
+      SocketService.acceptCall({
+        callerId,
+        senderId: receiverId,
+        receiverId: callerId,
+      });
 
       await WebRTCService.createPeerConnection(
         (candidate) => {
@@ -141,6 +151,7 @@ export default function CustomerIncomingCallScreen({ route, navigation }) {
     } catch (error) {
       console.log("CUSTOMER ACCEPT CALL ERROR:", error);
       setStatus("Call failed");
+      setAccepting(false);
       Alert.alert("Call Error", error?.message || "Unable to accept call");
     }
   };
@@ -271,7 +282,11 @@ export default function CustomerIncomingCallScreen({ route, navigation }) {
         </View>
 
         <View style={styles.buttonBox}>
-          <TouchableOpacity style={styles.accept} onPress={acceptCall}>
+          <TouchableOpacity
+            style={[styles.accept, accepting && styles.acceptDisabled]}
+            onPress={acceptCall}
+            disabled={accepting}
+          >
             <Text style={styles.phone}>✓</Text>
           </TouchableOpacity>
 
@@ -372,6 +387,10 @@ const styles = StyleSheet.create({
     backgroundColor: "#22c55e",
     justifyContent: "center",
     alignItems: "center",
+  },
+
+  acceptDisabled: {
+    opacity: 0.55,
   },
 
   decline: {

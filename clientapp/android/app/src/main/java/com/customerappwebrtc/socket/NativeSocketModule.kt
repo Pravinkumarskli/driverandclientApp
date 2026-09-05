@@ -9,6 +9,7 @@ import android.os.IBinder
 import android.util.Log
 import com.facebook.react.bridge.*
 import com.facebook.react.modules.core.DeviceEventManagerModule
+import org.json.JSONObject
 
 class NativeSocketModule(private val reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext), NativeWebSocketManager.SocketEventListener {
@@ -16,12 +17,17 @@ class NativeSocketModule(private val reactContext: ReactApplicationContext) :
     companion object {
         const val MODULE_NAME = "NativeSocketModule"
         private const val TAG = "NativeSocketModule_Client"
+        private const val NOTIFICATION_PREFS = "CabCustomerNotificationPrefs"
+        private const val PENDING_NOTIFICATION_KEY = "pendingNotification"
         var pendingNotificationMap: Map<String, Any?>? = null
         var instance: NativeSocketModule? = null
 
         fun dispatchNotificationIntent(paramsMap: Map<String, Any?>) {
             Log.d(TAG, "🔔 dispatchNotificationIntent called with action=${paramsMap["action"]}")
             pendingNotificationMap = paramsMap
+            // A static field is lost when Android recreates the process. Keep the tap
+            // payload on disk until JavaScript confirms that it has handled it.
+            instance?.savePendingNotification(paramsMap)
             instance?.let { module ->
                 try {
                     val map = Arguments.createMap().apply {
@@ -37,7 +43,6 @@ class NativeSocketModule(private val reactContext: ReactApplicationContext) :
                     }
                     module.sendEvent("onNotificationOpened", map)
                     Log.d(TAG, "🔔 Dispatched onNotificationOpened event to active React context")
-                    pendingNotificationMap = null
                 } catch (e: Exception) {
                     Log.w(TAG, "Error emitting onNotificationOpened event: ${e.message}")
                 }
@@ -47,6 +52,38 @@ class NativeSocketModule(private val reactContext: ReactApplicationContext) :
 
     init {
         instance = this
+    }
+
+    private fun savePendingNotification(data: Map<String, Any?>) {
+        try {
+            val json = JSONObject()
+            data.forEach { (key, value) -> json.put(key, value) }
+            reactContext.getSharedPreferences(NOTIFICATION_PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .putString(PENDING_NOTIFICATION_KEY, json.toString())
+                .apply()
+        } catch (e: Exception) {
+            Log.w(TAG, "Unable to persist notification intent: ${e.message}")
+        }
+    }
+
+    private fun readPendingNotification(): Map<String, Any?>? {
+        pendingNotificationMap?.let { return it }
+        return try {
+            val raw = reactContext.getSharedPreferences(NOTIFICATION_PREFS, Context.MODE_PRIVATE)
+                .getString(PENDING_NOTIFICATION_KEY, null) ?: return null
+            val json = JSONObject(raw)
+            buildMap {
+                val keys = json.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    put(key, json.get(key))
+                }
+            }.also { pendingNotificationMap = it }
+        } catch (e: Exception) {
+            Log.w(TAG, "Unable to read pending notification intent: ${e.message}")
+            null
+        }
     }
 
     private var service: SocketForegroundService? = null
@@ -177,7 +214,7 @@ class NativeSocketModule(private val reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun getInitialNotification(promise: Promise) {
-        val data = pendingNotificationMap
+        val data = readPendingNotification()
         Log.d(TAG, "🔔 getInitialNotification called, returning: $data")
         if (data != null) {
             val map = Arguments.createMap().apply {
@@ -201,6 +238,10 @@ class NativeSocketModule(private val reactContext: ReactApplicationContext) :
     fun clearInitialNotification(promise: Promise) {
         Log.d(TAG, "🔔 clearInitialNotification called")
         pendingNotificationMap = null
+        reactContext.getSharedPreferences(NOTIFICATION_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .remove(PENDING_NOTIFICATION_KEY)
+            .apply()
         promise.resolve(true)
     }
 

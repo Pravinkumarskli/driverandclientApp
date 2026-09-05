@@ -45,8 +45,9 @@ export default function App() {
 
     console.log("🔔 [GLOBAL CLIENT NOTIFICATION OPENED]:", data);
 
-    // Immediately clear stored notification from native layer
-    NativeSocketService.clearInitialNotification?.();
+    // There must be one owner for notification routing.  In particular, do not
+    // let CustomerLogin's auto-login replace this route with the home screen.
+    await NativeSocketService.clearInitialNotificationData?.();
 
     try {
       const session = await getUserSession();
@@ -61,7 +62,7 @@ export default function App() {
           try {
             parsedOffer =
               typeof data.offer === "string" ? JSON.parse(data.offer) : data.offer;
-          } catch (e) {
+          } catch {
             parsedOffer = data.offer;
           }
         }
