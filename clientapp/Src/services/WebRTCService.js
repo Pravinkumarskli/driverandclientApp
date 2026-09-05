@@ -461,6 +461,14 @@ class WebRTCService {
     });
   }
 
+  toggleMute(muted) {
+    this.mute(muted);
+  }
+
+  setMuted(muted) {
+    this.mute(muted);
+  }
+
   // const toggleMute = () => {
 
   //     const newValue =

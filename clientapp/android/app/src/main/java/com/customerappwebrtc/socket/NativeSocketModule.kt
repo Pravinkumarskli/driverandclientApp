@@ -16,7 +16,37 @@ class NativeSocketModule(private val reactContext: ReactApplicationContext) :
     companion object {
         const val MODULE_NAME = "NativeSocketModule"
         private const val TAG = "NativeSocketModule_Client"
-        var initialNotificationData: WritableMap? = null
+        var pendingNotificationMap: Map<String, Any?>? = null
+        var instance: NativeSocketModule? = null
+
+        fun dispatchNotificationIntent(paramsMap: Map<String, Any?>) {
+            Log.d(TAG, "🔔 dispatchNotificationIntent called with action=${paramsMap["action"]}")
+            pendingNotificationMap = paramsMap
+            instance?.let { module ->
+                try {
+                    val map = Arguments.createMap().apply {
+                        paramsMap.forEach { (k, v) ->
+                            when (v) {
+                                is String -> putString(k, v)
+                                is Boolean -> putBoolean(k, v)
+                                is Int -> putInt(k, v)
+                                is Double -> putDouble(k, v)
+                                else -> putString(k, v?.toString() ?: "")
+                            }
+                        }
+                    }
+                    module.sendEvent("onNotificationOpened", map)
+                    Log.d(TAG, "🔔 Dispatched onNotificationOpened event to active React context")
+                    pendingNotificationMap = null
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error emitting onNotificationOpened event: ${e.message}")
+                }
+            }
+        }
+    }
+
+    init {
+        instance = this
     }
 
     private var service: SocketForegroundService? = null
@@ -147,9 +177,46 @@ class NativeSocketModule(private val reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun getInitialNotification(promise: Promise) {
-        val data = initialNotificationData
-        initialNotificationData = null
-        promise.resolve(data)
+        val data = pendingNotificationMap
+        Log.d(TAG, "🔔 getInitialNotification called, returning: $data")
+        if (data != null) {
+            val map = Arguments.createMap().apply {
+                data.forEach { (k, v) ->
+                    when (v) {
+                        is String -> putString(k, v)
+                        is Boolean -> putBoolean(k, v)
+                        is Int -> putInt(k, v)
+                        is Double -> putDouble(k, v)
+                        else -> putString(k, v?.toString() ?: "")
+                    }
+                }
+            }
+            promise.resolve(map)
+        } else {
+            promise.resolve(null)
+        }
+    }
+
+    @ReactMethod
+    fun clearInitialNotification(promise: Promise) {
+        Log.d(TAG, "🔔 clearInitialNotification called")
+        pendingNotificationMap = null
+        promise.resolve(true)
+    }
+
+    @ReactMethod
+    fun cancelCallNotification(promise: Promise) {
+        try {
+            val notificationManager =
+                reactContext.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+            notificationManager.cancel(NotificationHelper.CALL_NOTIFICATION_ID)
+            Log.d(TAG, "🔔 cancelCallNotification dismissed notification ${NotificationHelper.CALL_NOTIFICATION_ID}")
+            pendingNotificationMap = null
+            promise.resolve(true)
+        } catch (e: Exception) {
+            Log.w(TAG, "Error in cancelCallNotification: ${e.message}")
+            promise.resolve(false)
+        }
     }
 
     private fun sendEvent(eventName: String, params: Any?) {

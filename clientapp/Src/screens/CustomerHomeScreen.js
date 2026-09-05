@@ -51,35 +51,6 @@ export default function CustomerHomeScreen({ route, navigation }) {
     SocketService.connect(userId);
     // Service is already started from LoginScreen. Don't call start() again.
 
-    const handleNotificationRoute = (data) => {
-      if (!data) return;
-      console.log("🔔 [CUSTOMER NOTIFICATION OPENED]:", data);
-      if (data.action === "INCOMING_CALL" || data.callerId) {
-        navigation.navigate("CustomerIncomingCall", {
-          callerId: data.callerId || data.senderId,
-          callerName: data.callerName || data.receiverName || "Driver",
-          receiverId: userId,
-          receiverName: userName,
-          offer: data.offer || null,
-        });
-      } else if (data.action === "OPEN_CHAT" || data.senderId) {
-        navigation.navigate("CustomerChat", {
-          userId: userId,
-          receiverId: data.senderId,
-          receiverName: data.receiverName || "Driver",
-          messageId: data.messageId || "",
-        });
-      }
-    };
-
-    // Check if opened via initial notification (App was killed)
-    NativeSocketService.getInitialNotificationData()
-      .then(handleNotificationRoute)
-      .catch((err) => console.warn("Initial notification check error:", err));
-
-    // Handle background notification clicks while app was open
-    const unsubscribeNotification = NativeSocketService.onNotificationOpened(handleNotificationRoute);
-
     SocketService.onDriverList((list) => {
       if (Array.isArray(list) && list.length > 0) {
         setDrivers(list);
@@ -100,7 +71,6 @@ export default function CustomerHomeScreen({ route, navigation }) {
     return () => {
       SocketService.off("driverList");
       SocketService.off("incomingCall", incomingCall);
-      unsubscribeNotification();
     };
   }, [navigation, userId]);
 

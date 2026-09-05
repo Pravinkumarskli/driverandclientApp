@@ -11,13 +11,17 @@ import {
 } from "react-native";
 
 import WebRTCService from "../services/WebRTCService";
-
 import SocketService from "../services/SocketService";
-
 import CallSoundService from "../services/CallSoundService";
+import NativeSocketService from "../services/NativeSocketService";
 
 export default function CustomerIncomingCallScreen({ route, navigation }) {
-  const { callerId, receiverId, receiverName, offer } = route.params;
+  const {
+    callerId = "driver_201",
+    receiverId = "customer_101",
+    receiverName = "Driver",
+    offer = null,
+  } = route.params || {};
 
   const [accepting, setAccepting] = useState(false);
   const [status, setStatus] = useState("Incoming voice call...");
@@ -29,6 +33,16 @@ export default function CustomerIncomingCallScreen({ route, navigation }) {
   const [connected, setConnected] = useState(false);
 
   const pulse = useRef(new Animated.Value(1)).current;
+
+  useEffect(() => {
+    NativeSocketService.cancelCallNotification?.();
+    NativeSocketService.clearInitialNotification?.();
+
+    if (route.params?.autoAnswer === true) {
+      console.log("⚡ [CLIENT] Auto-answering incoming call from notification action");
+      acceptCall();
+    }
+  }, []);
 
   useEffect(() => {
     const animation = Animated.loop(
@@ -56,58 +70,11 @@ export default function CustomerIncomingCallScreen({ route, navigation }) {
     };
   }, []);
 
-  // const acceptCall = () => {
-
-  //     console.log(
-  //         "CUSTOMER ACCEPT CALL FROM:",
-  //         callerId
-  //     );
-
-  //     navigation.replace(
-  //         "CustomerCallScreen",
-  //         {
-  //             userId: userId,
-  //             receiverId: callerId,
-  //             receiverName: callerName,
-  //             incoming: true,
-  //         }
-  //     );
-  // };
-
-  // const declineCall = () => {
-
-  //     console.log(
-  //         "CUSTOMER DECLINE CALL"
-  //     );
-
-  //     try {
-
-  //         if (
-  //             typeof SocketService.rejectCall ===
-  //             "function"
-  //         ) {
-
-  //             SocketService.rejectCall({
-  //                 senderId: userId,
-  //                 receiverId: callerId,
-  //             });
-
-  //         }
-
-  //     } catch (error) {
-
-  //         console.log(
-  //             "DECLINE ERROR:",
-  //             error
-  //         );
-
-  //     }
-
-  //     navigation.goBack();
-  // };
-
   const acceptCall = async () => {
     try {
+      NativeSocketService.cancelCallNotification?.();
+      NativeSocketService.clearInitialNotification?.();
+
       // Clear auto-reject timer on accept
       if (autoRejectTimerRef.current) {
         clearTimeout(autoRejectTimerRef.current);
@@ -142,10 +109,19 @@ export default function CustomerIncomingCallScreen({ route, navigation }) {
       setCallStatus("Opening microphone...");
       await WebRTCService.getLocalAudio();
 
-      setCallStatus("Creating offer...");
+      setCallStatus("Creating answer...");
       console.log("CUSTOMER OFFER:", offer);
 
-      const answer = await WebRTCService.createAnswer(offer);
+      let parsedOffer = offer;
+      if (typeof offer === "string" && offer.trim().length > 0) {
+        try {
+          parsedOffer = JSON.parse(offer);
+        } catch (e) {
+          parsedOffer = offer;
+        }
+      }
+
+      const answer = await WebRTCService.createAnswer(parsedOffer);
       console.log("DRIVER ANSWER:", answer);
 
       SocketService.sendAnswer({
@@ -173,6 +149,9 @@ export default function CustomerIncomingCallScreen({ route, navigation }) {
     console.log("CUSTOMER DECLINE CALL");
 
     try {
+      NativeSocketService.cancelCallNotification?.();
+      NativeSocketService.clearInitialNotification?.();
+
       // Clear auto-reject timer on manual decline
       if (autoRejectTimerRef.current) {
         clearTimeout(autoRejectTimerRef.current);
@@ -189,10 +168,25 @@ export default function CustomerIncomingCallScreen({ route, navigation }) {
       console.log("DECLINE ERROR:", error);
     }
 
-    navigation.goBack();
+    if (navigation.canGoBack()) {
+      navigation.goBack();
+    } else {
+      navigation.navigate("CustomerHomeScreen");
+    }
   };
 
   useEffect(() => {
+    const safeGoBack = () => {
+      NativeSocketService.cancelCallNotification?.();
+      NativeSocketService.clearInitialNotification?.();
+
+      if (navigation.canGoBack()) {
+        navigation.goBack();
+      } else {
+        navigation.navigate("CustomerHomeScreen");
+      }
+    };
+
     CallSoundService.startIncomingRingtone();
 
     // If caller cancels or ends call while ringing
@@ -203,7 +197,7 @@ export default function CustomerIncomingCallScreen({ route, navigation }) {
         clearTimeout(autoRejectTimerRef.current);
         autoRejectTimerRef.current = null;
       }
-      navigation.goBack();
+      safeGoBack();
     };
 
     SocketService.onCallEnded(handleCallEnded);
@@ -221,7 +215,7 @@ export default function CustomerIncomingCallScreen({ route, navigation }) {
       } catch (error) {
         console.log("AUTO-REJECT ERROR:", error);
       }
-      navigation.goBack();
+      safeGoBack();
     }, AUTO_REJECT_TIMEOUT_MS);
 
     return () => {

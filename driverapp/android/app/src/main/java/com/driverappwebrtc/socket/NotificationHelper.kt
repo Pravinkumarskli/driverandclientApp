@@ -124,6 +124,7 @@ class NotificationHelper(private val context: Context) {
         messageId: String = ""
     ) {
         val intent = Intent(context, MainActivity::class.java).apply {
+            action = "com.driverappwebrtc.ACTION_OPEN_CHAT"
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
             putExtra("senderId", senderId)
             putExtra("receiverId", senderId)
@@ -164,7 +165,9 @@ class NotificationHelper(private val context: Context) {
         userType: String = "client",
         offerJson: String = ""
     ) {
+        // 1. PendingIntent for clicking notification body (Opens IncomingCall screen)
         val intent = Intent(context, MainActivity::class.java).apply {
+            action = "com.driverappwebrtc.ACTION_INCOMING_CALL"
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
             putExtra("callerId", callerId)
             putExtra("callerName", callerName)
@@ -172,6 +175,7 @@ class NotificationHelper(private val context: Context) {
             putExtra("receiverName", callerName)
             putExtra("userType", userType)
             putExtra("offer", offerJson)
+            putExtra("autoAnswer", false)
             putExtra("action", "INCOMING_CALL")
         }
 
@@ -179,6 +183,27 @@ class NotificationHelper(private val context: Context) {
             context,
             CALL_NOTIFICATION_ID,
             intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        // 2. PendingIntent for clicking "ANSWER" action button (Directly answers & opens call)
+        val answerIntent = Intent(context, MainActivity::class.java).apply {
+            action = "com.driverappwebrtc.ACTION_ANSWER_CALL"
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            putExtra("callerId", callerId)
+            putExtra("callerName", callerName)
+            putExtra("senderId", callerId)
+            putExtra("receiverName", callerName)
+            putExtra("userType", userType)
+            putExtra("offer", offerJson)
+            putExtra("autoAnswer", true)
+            putExtra("action", "INCOMING_CALL")
+        }
+
+        val answerPendingIntent = PendingIntent.getActivity(
+            context,
+            CALL_NOTIFICATION_ID + 1,
+            answerIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
@@ -193,7 +218,7 @@ class NotificationHelper(private val context: Context) {
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .addAction(R.mipmap.ic_launcher, "ANSWER", pendingIntent)
+            .addAction(R.mipmap.ic_launcher, "ANSWER", answerPendingIntent)
             .build()
 
         notificationManager.notify(CALL_NOTIFICATION_ID, notification)

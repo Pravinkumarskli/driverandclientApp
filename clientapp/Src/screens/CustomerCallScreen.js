@@ -15,6 +15,7 @@ import {
 import SocketService from "../services/SocketService";
 import WebRTCService from "../services/WebRTCService";
 import CallSoundService from "../services/CallSoundService";
+import NativeSocketService from "../services/NativeSocketService";
 
 export default function CustomerCallScreen({ route, navigation }) {
   const {
@@ -34,6 +35,11 @@ export default function CustomerCallScreen({ route, navigation }) {
   const ringingTimeoutRef = useRef(null);
 
   const RINGING_TIMEOUT_MS = 40000; // 40 seconds auto-cut
+
+  useEffect(() => {
+    NativeSocketService.cancelCallNotification?.();
+    NativeSocketService.clearInitialNotification?.();
+  }, []);
 
   // Pulse animation for avatar while ringing
   useEffect(() => {
@@ -195,6 +201,17 @@ export default function CustomerCallScreen({ route, navigation }) {
           }
         });
 
+        const safeGoBack = () => {
+          NativeSocketService.cancelCallNotification?.();
+          NativeSocketService.clearInitialNotification?.();
+
+          if (navigation.canGoBack()) {
+            navigation.goBack();
+          } else {
+            navigation.navigate("CustomerHomeScreen");
+          }
+        };
+
         // 8. Listen for Call Rejected / Declined
         SocketService.onCallRejected(() => {
           console.log("❌ [CUSTOMER] Driver declined call");
@@ -205,7 +222,7 @@ export default function CustomerCallScreen({ route, navigation }) {
           }
           if (isMounted) {
             setCallStatus("Call Declined");
-            setTimeout(() => navigation.goBack(), 1200);
+            setTimeout(() => safeGoBack(), 1200);
           }
         });
 
@@ -219,7 +236,7 @@ export default function CustomerCallScreen({ route, navigation }) {
           }
           if (isMounted) {
             setCallStatus("Call Ended");
-            setTimeout(() => navigation.goBack(), 800);
+            setTimeout(() => safeGoBack(), 800);
           }
         });
 
@@ -233,7 +250,11 @@ export default function CustomerCallScreen({ route, navigation }) {
         console.error("CUSTOMER CALL START ERROR:", err);
         CallSoundService.stopAll();
         Alert.alert("Call Error", err?.message || "Failed to start call");
-        navigation.goBack();
+        if (navigation.canGoBack()) {
+          navigation.goBack();
+        } else {
+          navigation.navigate("CustomerHomeScreen");
+        }
       }
     };
 
@@ -270,7 +291,11 @@ export default function CustomerCallScreen({ route, navigation }) {
       receiverId: receiverId,
     });
     WebRTCService.close();
-    navigation.goBack();
+    if (navigation.canGoBack()) {
+      navigation.goBack();
+    } else {
+      navigation.navigate("CustomerHomeScreen");
+    }
   };
 
   return (

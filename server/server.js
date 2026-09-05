@@ -36,6 +36,7 @@ const userRegistry    = new Map(); // userId -> { userId, userType, name, online
 const conversationHistory = new Map(); // conversationId -> Message[]
 const activeTracking  = new Map(); // customerId -> driverId
 const driverLocations = new Map(); // driverId -> location
+const customerLocations = new Map(); // customerId -> location
 
 function getConversationId(id1, id2) {
   return [id1, id2].sort().join('_');
@@ -252,6 +253,25 @@ wss.on('connection', (ws, req) => {
       }
 
       // ── GPS LOCATION ──────────────────────────────────────
+      if (type === 'customerLocation') {
+        const customerId = data.customerId || authUserId;
+        if (!customerId) return;
+        const loc = {
+          customerId,
+          latitude: Number(data.latitude),
+          longitude: Number(data.longitude),
+          accuracy: Number(data.accuracy || 5),
+          heading: Number(data.heading || 0),
+          timestamp: data.timestamp || Date.now(),
+        };
+        if (!Number.isFinite(loc.latitude) || !Number.isFinite(loc.longitude)) return;
+        customerLocations.set(customerId, loc);
+        const driverId = activeTracking.get(customerId);
+        if (driverId) emitToUser(driverId, 'customerLocationUpdate', loc);
+        io.emit('customerLocationUpdate', loc);
+        return;
+      }
+
       if (type === 'sendLocation' || type === 'driverLocation') {
         const driverId = data.driverId || authUserId;
         const loc = {
@@ -439,6 +459,8 @@ io.on('connection', (socket) => {
     activeTracking.set(customerId, driverId);
     const lastLoc = driverLocations.get(driverId);
     if (lastLoc) socket.emit('driverLocationUpdate', lastLoc);
+    const customerLoc = customerLocations.get(customerId);
+    if (customerLoc) emitToUser(driverId, 'customerLocationUpdate', customerLoc);
   });
 
   socket.on('stopTracking', (data) => {
@@ -499,6 +521,24 @@ io.on('connection', (socket) => {
     }
     io.emit('driverLocationUpdate', loc);
     io.emit('driverLocation', loc);
+  });
+
+  socket.on('customerLocation', (data) => {
+    const customerId = data.customerId || socketUserId;
+    if (!customerId) return;
+    const loc = {
+      customerId,
+      latitude: Number(data.latitude),
+      longitude: Number(data.longitude),
+      accuracy: Number(data.accuracy || 5),
+      heading: Number(data.heading || 0),
+      timestamp: data.timestamp || Date.now(),
+    };
+    if (!Number.isFinite(loc.latitude) || !Number.isFinite(loc.longitude)) return;
+    customerLocations.set(customerId, loc);
+    const driverId = activeTracking.get(customerId);
+    if (driverId) emitToUser(driverId, 'customerLocationUpdate', loc);
+    io.emit('customerLocationUpdate', loc);
   });
 
   socket.on('callUser', (data) => {

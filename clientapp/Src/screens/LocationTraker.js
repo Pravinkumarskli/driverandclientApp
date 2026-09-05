@@ -68,6 +68,19 @@ const LocationTracker = ({ customerId = 'customer_101', onLocationChange = null 
           onLocationChange(newLoc);
         }
 
+        const locationPayload = {
+          customerId,
+          latitude,
+          longitude,
+          accuracy: newLoc.accuracy,
+          heading: newLoc.heading,
+          timestamp: position.timestamp || Date.now(),
+        };
+        // Send through both transports: native service survives a swiped app,
+        // Socket.IO keeps the currently open map instant.
+        NativeSocketService.sendCustomerLocation(locationPayload);
+        SocketService.sendCustomerLocation(locationPayload);
+
         console.log('📍 [CUSTOMER LOCATION TRACKER]:', latitude, longitude);
       },
       (error) => console.log('Customer Location Error:', error?.message || error),

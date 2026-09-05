@@ -274,51 +274,58 @@ class SocketForegroundService : Service(), NativeWebSocketManager.SocketEventLis
 
     override fun onBind(intent: Intent?): IBinder = binder
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        Log.d(TAG, "DriverApp task removed (swiped away). Keeping background service active.")
+        isAppInForeground = false
+        clientListener = null
+    }
+
     override fun onMessageReceived(messageJson: String) {
+        Log.d(TAG, "📩 onMessageReceived: ${messageJson.take(120)}")
         // 1. Forward directly to React Native JavaScript layer
         clientListener?.onMessageReceived(messageJson)
 
-        // 2. If app is backgrounded OR JS runtime is not yet attached, show local notification
-        if (!isAppInForeground || clientListener == null) {
-            try {
-                acquireWakeLock(10000)
-                val json = JSONObject(messageJson)
-                val eventType = json.optString("type", "")
+        // 2. Display notification for chat messages and incoming calls
+        try {
+            acquireWakeLock(15000)
+            val json = JSONObject(messageJson)
+            val eventType = json.optString("type", "")
 
-                if (eventType == "chat" || eventType == "receiveMessage") {
-                    val senderId = json.optString("senderId", "Customer")
-                    val senderName = json.optString("senderName", senderId)
-                    val message = json.optString("message", "New customer message")
-                    val conversationId = json.optString("conversationId", "")
-                    val userType = json.optString("senderType", "client")
-                    val messageId = json.optString("messageId", json.optString("id", ""))
+            if (eventType == "chat" || eventType == "receiveMessage") {
+                val senderId = json.optString("senderId", "Customer")
+                val senderName = json.optString("senderName", senderId)
+                val message = json.optString("message", "New customer message")
+                val conversationId = json.optString("conversationId", "")
+                val userType = json.optString("senderType", "client")
+                val messageId = json.optString("messageId", json.optString("id", ""))
 
-                    notificationHelper.showMessageNotification(
-                        senderId = senderId,
-                        senderName = senderName,
-                        messageText = message,
-                        conversationId = conversationId,
-                        userType = userType,
-                        messageId = messageId
-                    )
-                } else if (eventType == "incomingCall" || eventType == "callUser") {
-                    val callerId = json.optString("callerId", json.optString("senderId", "Customer"))
-                    val callerName = json.optString("callerName", json.optString("senderName", "Customer"))
-                    val userType = json.optString("userType", json.optString("senderType", "client"))
-                    val offerJson = json.optString("offer", "")
+                notificationHelper.showMessageNotification(
+                    senderId = senderId,
+                    senderName = senderName,
+                    messageText = message,
+                    conversationId = conversationId,
+                    userType = userType,
+                    messageId = messageId
+                )
+            } else if (eventType == "incomingCall" || eventType == "callUser") {
+                val callerId = json.optString("callerId", json.optString("senderId", "Customer"))
+                val callerName = json.optString("callerName", json.optString("senderName", "Customer"))
+                val userType = json.optString("userType", json.optString("senderType", "client"))
+                val offerObj = json.opt("offer")
+                val offerJson = if (offerObj != null && offerObj != JSONObject.NULL) offerObj.toString() else ""
 
-                    notificationHelper.showIncomingCallNotification(
-                        callerId = callerId,
-                        callerName = callerName,
-                        userType = userType,
-                        offerJson = offerJson
-                    )
-                } else if (eventType == "endCall" || eventType == "callEnded" || eventType == "callRejected") {
-                    notificationHelper.cancelCallNotification()
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error displaying message/call notification: ${e.message}", e)
+                notificationHelper.showIncomingCallNotification(
+                    callerId = callerId,
+                    callerName = callerName,
+                    userType = userType,
+                    offerJson = offerJson
+                )
+            } else if (eventType == "endCall" || eventType == "callEnded" || eventType == "callRejected") {
+                notificationHelper.cancelCallNotification()
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error displaying message/call notification: ${e.message}", e)
         }
     }
 

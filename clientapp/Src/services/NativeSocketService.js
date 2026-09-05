@@ -159,6 +159,21 @@ class NativeSocketService {
     }
   }
 
+  // Publish the passenger's live home/pickup coordinate to the assigned driver.
+  async sendCustomerLocation(locationData) {
+    if (Platform.OS !== "android" || !NativeSocketModule) return false;
+    try {
+      return await NativeSocketModule.sendMessage(JSON.stringify({
+        type: "customerLocation",
+        customerId: this.currentUserId,
+        ...locationData,
+      }));
+    } catch (error) {
+      console.error("[NativeSocketService] sendCustomerLocation error:", error);
+      return false;
+    }
+  }
+
   // Fetch message history from server (HTTP first for instant speed, WS as fallback)
   async getMessages(userId, otherUserId, timeoutMs = 5000) {
     const uId = userId || this.currentUserId;
@@ -244,9 +259,25 @@ class NativeSocketService {
   async getInitialNotificationData() {
     if (Platform.OS !== "android" || !NativeSocketModule) return null;
     try {
-      return await NativeSocketModule.getInitialNotification();
+      if (this.cachedInitialNotification) {
+        return this.cachedInitialNotification;
+      }
+      const data = await NativeSocketModule.getInitialNotification();
+      if (data) {
+        this.cachedInitialNotification = data;
+      }
+      return data;
     } catch (e) {
       return null;
+    }
+  }
+
+  async clearInitialNotificationData() {
+    this.cachedInitialNotification = null;
+    if (Platform.OS === "android" && NativeSocketModule?.clearInitialNotification) {
+      try {
+        await NativeSocketModule.clearInitialNotification();
+      } catch (_) {}
     }
   }
 
@@ -355,6 +386,37 @@ class NativeSocketService {
   onNotificationOpened(callback) {
     this.notificationListeners.add(callback);
     return () => this.notificationListeners.delete(callback);
+  }
+
+  async getInitialNotification() {
+    try {
+      if (NativeSocketModule?.getInitialNotification) {
+        return await NativeSocketModule.getInitialNotification();
+      }
+    } catch (e) {
+      console.warn("[NativeSocketService] getInitialNotification error:", e);
+    }
+    return null;
+  }
+
+  async clearInitialNotification() {
+    try {
+      if (NativeSocketModule?.clearInitialNotification) {
+        await NativeSocketModule.clearInitialNotification();
+      }
+    } catch (e) {
+      console.warn("[NativeSocketService] clearInitialNotification error:", e);
+    }
+  }
+
+  async cancelCallNotification() {
+    try {
+      if (NativeSocketModule?.cancelCallNotification) {
+        await NativeSocketModule.cancelCallNotification();
+      }
+    } catch (e) {
+      console.warn("[NativeSocketService] cancelCallNotification error:", e);
+    }
   }
 }
 

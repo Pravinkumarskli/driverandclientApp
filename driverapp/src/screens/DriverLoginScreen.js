@@ -65,6 +65,44 @@ export default function DriverLoginScreen({ navigation }) {
           );
           SocketService.connect(savedSession.driverId);
           setIsConnecting(false);
+
+          // Check if there was a launch notification that opened the app
+          const initialNotif = await NativeSocketService.getInitialNotificationData();
+          if (initialNotif && isMounted) {
+            console.log("🔔 [AUTO-LOGIN DRIVER] Routing directly from launch notification:", initialNotif);
+            await NativeSocketService.clearInitialNotificationData();
+
+            if (initialNotif.action === "INCOMING_CALL" || initialNotif.callerId) {
+              let parsedOffer = null;
+              if (initialNotif.offer) {
+                try {
+                  parsedOffer =
+                    typeof initialNotif.offer === "string"
+                      ? JSON.parse(initialNotif.offer)
+                      : initialNotif.offer;
+                } catch (e) {
+                  parsedOffer = initialNotif.offer;
+                }
+              }
+              navigation.replace("IncomingCall", {
+                callerId: initialNotif.callerId || initialNotif.senderId,
+                callerName: initialNotif.callerName || initialNotif.receiverName || "Customer",
+                receiverId: savedSession.driverId,
+                offer: parsedOffer,
+                autoAnswer: initialNotif.autoAnswer === true,
+              });
+              return;
+            } else if (initialNotif.action === "OPEN_CHAT" || initialNotif.senderId) {
+              navigation.replace("DriverChat", {
+                userId: savedSession.driverId,
+                receiverId: initialNotif.senderId,
+                receiverName: initialNotif.receiverName || "Customer",
+                messageId: initialNotif.messageId || "",
+              });
+              return;
+            }
+          }
+
           navigation.replace("DriverHome", {
             driverId: savedSession.driverId,
             driverName: savedSession.driverName || savedSession.driverId,
@@ -121,6 +159,40 @@ export default function DriverLoginScreen({ navigation }) {
       SocketService.connect(finalId);
 
       setIsConnecting(false);
+
+      const initialNotif = await NativeSocketService.getInitialNotificationData();
+      if (initialNotif) {
+        await NativeSocketService.clearInitialNotificationData();
+        if (initialNotif.action === "INCOMING_CALL" || initialNotif.callerId) {
+          let parsedOffer = null;
+          if (initialNotif.offer) {
+            try {
+              parsedOffer =
+                typeof initialNotif.offer === "string"
+                  ? JSON.parse(initialNotif.offer)
+                  : initialNotif.offer;
+            } catch (e) {
+              parsedOffer = initialNotif.offer;
+            }
+          }
+          navigation.replace("IncomingCall", {
+            callerId: initialNotif.callerId || initialNotif.senderId,
+            callerName: initialNotif.callerName || initialNotif.receiverName || "Customer",
+            receiverId: finalId,
+            offer: parsedOffer,
+            autoAnswer: initialNotif.autoAnswer === true,
+          });
+          return;
+        } else if (initialNotif.action === "OPEN_CHAT" || initialNotif.senderId) {
+          navigation.replace("DriverChat", {
+            userId: finalId,
+            receiverId: initialNotif.senderId,
+            receiverName: initialNotif.receiverName || "Customer",
+            messageId: initialNotif.messageId || "",
+          });
+          return;
+        }
+      }
 
       navigation.replace("DriverHome", {
         driverId: finalId,

@@ -1,483 +1,801 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import {
   Alert,
+  Image,
+  PermissionsAndroid,
+  Platform,
   SafeAreaView,
+  ScrollView,
   StatusBar,
   StyleSheet,
   Text,
   TouchableOpacity,
   View,
 } from 'react-native';
-import MapView, {
+
+import {
+  Map,
+  Camera,
+  GeoJSONSource,
+  Layer,
   Marker,
-  Polyline,
-  PROVIDER_GOOGLE,
-  AnimatedRegion,
-  MarkerAnimated,
-} from 'react-native-maps';
-
+} from '@maplibre/maplibre-react-native';
+import Geolocation from '@react-native-community/geolocation';
 import SocketService from '../services/SocketService';
+import MapButton from './MapButton';
 
-const ROUTE_COORDINATES = [
-  { latitude: 12.0125, longitude: 79.8550 },
-  { latitude: 12.0050, longitude: 79.8510 },
-  { latitude: 11.9920, longitude: 79.8450 },
-  { latitude: 11.9800, longitude: 79.8390 },
-  { latitude: 11.9680, longitude: 79.8320 },
-  { latitude: 11.9550, longitude: 79.8220 },
-  { latitude: 11.9480, longitude: 79.8150 },
-  { latitude: 11.9416, longitude: 79.8083 },
-];
+const MAP_STYLE_URL = 'https://tiles.openfreemap.org/styles/liberty';
 
-const TOTAL_STEPS = 80;
+// Overview zoom level matching the initial view
+const INITIAL_ZOOM = 12.3;
+
+// ---------- Fetch Real Road Route via OSRM Router ----------
+async function fetchRoadRouteOSRM(originLngLat, destLngLat) {
+  if (!originLngLat || !destLngLat) return null;
+
+  try {
+    const [origLng, origLat] = originLngLat;
+    const [destLng, destLat] = destLngLat;
+
+    const url = `https://router.project-osrm.org/route/v1/driving/${origLng},${origLat};${destLng},${destLat}?overview=full&geometries=geojson`;
+    const res = await fetch(url);
+    const data = await res.json();
+
+    if (data.code === 'Ok' && data.routes && data.routes.length > 0) {
+      const coords = data.routes[0].geometry.coordinates; // Array of [lng, lat]
+      if (coords && coords.length > 1) {
+        console.log(
+          '🛣️ [DRIVER OSRM ROAD ROUTE] Coordinates fetched:',
+          coords.length,
+          'points',
+        );
+        return coords;
+      }
+    }
+  } catch (err) {
+    console.log('OSRM routing notice:', err?.message || err);
+  }
+
+  // Fallback checkpoints if offline
+  return [
+    originLngLat,
+    [
+      (originLngLat[0] * 2 + destLngLat[0]) / 3,
+      (originLngLat[1] * 2 + destLngLat[1]) / 3,
+    ],
+    [
+      (originLngLat[0] + destLngLat[0] * 2) / 3,
+      (originLngLat[1] + destLngLat[1] * 2) / 3,
+    ],
+    destLngLat,
+  ];
+}
 
 export default function MapScreen({ route, navigation }) {
   const {
     driverId = 'driver_201',
     customerId = 'customer_101',
-    customerName = 'Customer 101',
+    customerName = 'Ananya Sharma',
+    destinationTitle = 'Gatot Subroto Street 8129',
+    bookingNumber = 'AB321481251245612',
+    originCity = 'Minnesota, USA',
+    destinationCity = 'New York, USA',
+    createdDate = 'June 4, 2025',
   } = (route && route.params) || {};
 
-  const mapRef = useRef(null);
-  const [isBroadcasting, setIsBroadcasting] = useState(true);
-  const [broadcastCount, setBroadcastCount] = useState(0);
-  const [hasArrived, setHasArrived] = useState(false);
+  const cameraRef = useRef(null);
+  const isInitialCameraSetRef = useRef(false);
 
-  const isBroadcastingRef = useRef(true);
-  const stepRef = useRef(0);
+  // 1. FIXED Customer Home Location [longitude, latitude] (Stationary Destination)
+  const [homeLocation, setHomeLocation] = useState([79.8083, 11.9416]);
 
-  const [driverCoord, setDriverCoord] = useState({
-    latitude: 12.0125,
-    longitude: 79.8550,
-  });
+  // 2. MOVING Driver Car Location [longitude, latitude] (Moves along road towards Home)
+  const [carLocation, setCarLocation] = useState([79.825, 11.975]);
 
-  const animatedDriverCoord = useRef(
-    new AnimatedRegion({
-      latitude: 12.0125,
-      longitude: 79.8550,
-      latitudeDelta: 0,
-      longitudeDelta: 0,
-    })
-  ).current;
+  // 3. Road Route Coordinates [[lng, lat], [lng, lat], ...]
+  const [routeCoordinates, setRouteCoordinates] = useState([
+    [79.825, 11.975],
+    [79.8083, 11.9416],
+  ]);
 
-  const pickupCoord = ROUTE_COORDINATES[0];
-  const dropCoord = ROUTE_COORDINATES[ROUTE_COORDINATES.length - 1];
-  const [speed, setSpeed] = useState(38);
+  const routePointsRef = useRef([]);
+  const stepIndexRef = useRef(0);
 
+  // Request Location Permission on Android
+  const requestLocationPermission = async () => {
+    if (Platform.OS === 'android') {
+      try {
+        const granted = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+          {
+            title: 'Location Permission',
+            message: 'Driver App needs your location for road navigation.',
+            buttonPositive: 'OK',
+          },
+        );
+        return granted === PermissionsAndroid.RESULTS.GRANTED;
+      } catch (e) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  // Generate Road Route from Driver starting point (~3.5km away) to Fixed Customer Home
+  const generateRoadRoute = useCallback(async (fixedHomeLngLat) => {
+    try {
+      const driverStart = [
+        fixedHomeLngLat[0] + 0.018,
+        fixedHomeLngLat[1] + 0.032,
+      ];
+
+      // Initial car starting position at 3.5km away
+      setCarLocation(driverStart);
+
+      console.log(
+        '📍 [DRIVER MAP] Generating road route from Driver -> Customer Home:',
+        driverStart,
+        '->',
+        fixedHomeLngLat,
+      );
+      const roadCoords = await fetchRoadRouteOSRM(driverStart, fixedHomeLngLat);
+
+      if (roadCoords && roadCoords.length > 1) {
+        setRouteCoordinates(roadCoords);
+        routePointsRef.current = roadCoords;
+        stepIndexRef.current = 0;
+
+        const centerLng = (driverStart[0] + fixedHomeLngLat[0]) / 2;
+        const centerLat = (driverStart[1] + fixedHomeLngLat[1]) / 2;
+
+        // Auto-zoom once at the start using MapLibre flyTo API
+        if (!isInitialCameraSetRef.current && cameraRef.current) {
+          isInitialCameraSetRef.current = true;
+          cameraRef.current.flyTo({
+            center: [centerLng, centerLat],
+            zoom: INITIAL_ZOOM,
+            duration: 1000,
+          });
+        }
+      }
+    } catch (err) {
+      console.log('Road route generation error:', err);
+    }
+  }, []);
+
+  // Fetch Home/Destination GPS ONCE on start & connect driver socket
   useEffect(() => {
-    isBroadcastingRef.current = isBroadcasting;
-  }, [isBroadcasting]);
+    let isMounted = true;
 
-  useEffect(() => {
     SocketService.connect(driverId);
 
-    SocketService.sendLocation({
-      driverId,
-      latitude: driverCoord.latitude,
-      longitude: driverCoord.longitude,
-      accuracy: 5,
-      speed: 38,
-      heading: 90,
-      timestamp: Date.now(),
-    });
-    setBroadcastCount(1);
+    const initLocation = async () => {
+      try {
+        const hasPerm = await requestLocationPermission();
+        if (hasPerm) {
+          Geolocation.getCurrentPosition(
+            (pos) => {
+              if (isMounted && pos?.coords) {
+                const { latitude, longitude } = pos.coords;
+                const fixedHome = [longitude, latitude];
+                console.log('🏠 [FIXED CUSTOMER HOME GPS SET]:', fixedHome);
+                setHomeLocation(fixedHome);
+                generateRoadRoute(fixedHome);
+              }
+            },
+            (err) => {
+              if (isMounted) {
+                console.log(
+                  'Geolocation error, using default home:',
+                  err?.message,
+                );
+                generateRoadRoute(homeLocation);
+              }
+            },
+            { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 },
+          );
+        } else if (isMounted) {
+          generateRoadRoute(homeLocation);
+        }
+      } catch (e) {
+        if (isMounted) {
+          console.log('Init location error:', e);
+          generateRoadRoute(homeLocation);
+        }
+      }
+    };
 
+    initLocation();
+
+    return () => {
+      isMounted = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [driverId]);
+
+  // 10-Second Continuous CAR-ONLY Movement along Road Route & Live Socket Broadcast
+  useEffect(() => {
     const interval = setInterval(() => {
-      if (!isBroadcastingRef.current) return;
+      const pts = routePointsRef.current;
+      if (!pts || pts.length <= 1) return;
 
-      if (stepRef.current >= TOTAL_STEPS) {
-        clearInterval(interval);
-        setHasArrived(true);
-        return;
+      let nextIndex = stepIndexRef.current + 1;
+
+      // When car reaches Home (end of route), loop back to the 3.5km start point
+      if (nextIndex >= pts.length) {
+        console.log(
+          '🚗 [DRIVER CAR ARRIVED AT CUSTOMER HOME] -> Restarting from 3.5km start point',
+        );
+        nextIndex = 0;
       }
 
-      stepRef.current += 1;
-      const step = stepRef.current;
+      stepIndexRef.current = nextIndex;
+      const nextCarPos = pts[nextIndex];
 
-      const latDelta = (dropCoord.latitude - pickupCoord.latitude) * (step / TOTAL_STEPS);
-      const lngDelta = (dropCoord.longitude - pickupCoord.longitude) * (step / TOTAL_STEPS);
+      console.log(
+        `🚗 [DRIVER CAR MOVING] Step ${nextIndex + 1}/${pts.length}:`,
+        nextCarPos,
+      );
+      setCarLocation(nextCarPos);
 
-      const nextLat = pickupCoord.latitude + latDelta;
-      const nextLng = pickupCoord.longitude + lngDelta;
-      const simulatedSpeed = 35 + (step % 10);
-
-      setDriverCoord({ latitude: nextLat, longitude: nextLng });
-      setSpeed(simulatedSpeed);
-      setBroadcastCount((prev) => prev + 1);
-
-      animatedDriverCoord
-        .timing({
-          latitude: nextLat,
-          longitude: nextLng,
-          duration: 1000,
-          useNativeDriver: false,
-        })
-        .start();
-
+      // Broadcast Driver Live GPS to Customer via Socket
       SocketService.sendLocation({
         driverId,
-        latitude: nextLat,
-        longitude: nextLng,
+        latitude: nextCarPos[1],
+        longitude: nextCarPos[0],
         accuracy: 4,
-        speed: simulatedSpeed,
+        speed: 38 + (nextIndex % 6),
         heading: 90,
         timestamp: Date.now(),
       });
-    }, 2000);
+    }, 10000); // 10 seconds interval
 
-    return () => {
-      clearInterval(interval);
-      SocketService.disconnect?.();
-    };
-  }, []);
+    return () => clearInterval(interval);
+  }, [driverId]);
 
+  // Manual Recenter Camera (when user clicks the compass button)
   const recenterMap = () => {
-    if (mapRef.current) {
-      mapRef.current.animateToRegion(
-        {
-          latitude: driverCoord.latitude - 0.012,
-          longitude: driverCoord.longitude,
-          latitudeDelta: 0.05,
-          longitudeDelta: 0.05,
-        },
-        800,
-      );
+    try {
+      if (cameraRef.current) {
+        cameraRef.current.flyTo({
+          center: [
+            (carLocation[0] + homeLocation[0]) / 2,
+            (carLocation[1] + homeLocation[1]) / 2,
+          ],
+          zoom: INITIAL_ZOOM,
+          duration: 800,
+        });
+      }
+    } catch (e) {
+      console.log('Recenter error:', e);
     }
   };
 
-  const toggleBroadcast = () => {
-    const next = !isBroadcasting;
-    setIsBroadcasting(next);
-    Alert.alert(
-      next ? 'Broadcast Resumed' : 'Broadcast Paused',
-      next
-        ? 'GPS location is now broadcasting live to passenger.'
-        : 'GPS broadcasting paused.',
-    );
-  };
-
   const openChat = () => {
-    navigation.navigate('DriverChat', {
-      userId: driverId,
-      receiverId: customerId,
-      receiverName: customerName,
-    });
+    if (navigation?.navigate) {
+      navigation.navigate('DriverChat', {
+        userId: driverId,
+        receiverId: customerId,
+        receiverName: customerName,
+      });
+    }
   };
 
   const openCall = () => {
-    navigation.navigate('DriverCallScreen', {
-      userId: driverId,
-      receiverId: customerId,
-      receiverName: customerName,
-    });
+    if (navigation?.navigate) {
+      navigation.navigate('DriverCallScreen', {
+        userId: driverId,
+        receiverId: customerId,
+        receiverName: customerName,
+      });
+    }
   };
 
-  const handleTripDetails = () => {
-    Alert.alert(
-      'Trip Dispatch Summary',
-      `Customer: ${customerName}\nPickup: Kalapet Beach Road\nDrop: Pondicherry White Town\nFare: 350 INR\nStatus: ${
-        hasArrived ? 'Arrived at destination' : 'GPS Live Dispatched'
-      }`,
-    );
-  };
-
-  const handleCompleteTrip = () => {
-    Alert.alert('Arrived at Destination', 'Confirm completion of current trip?', [
-      { text: 'Cancel', style: 'cancel' },
+  const routeGeoJSON = {
+    type: 'FeatureCollection',
+    features: [
       {
-        text: 'Complete Trip',
-        onPress: () => {
-          Alert.alert('Success', 'Trip completed successfully! Fare: 350 INR collected.');
-          navigation.goBack();
+        type: 'Feature',
+        geometry: {
+          type: 'LineString',
+          coordinates: routeCoordinates,
         },
       },
-    ]);
+    ],
   };
 
   return (
-    <View style={{ flex: 1 }}>
-      <StatusBar barStyle="dark-content" backgroundColor="transparent" translucent />
-
-      <SafeAreaView style={styles.topSafeArea}>
-        <View style={styles.header}>
-          <TouchableOpacity
-            onPress={() => navigation.goBack()}
-            style={[styles.btn, styles.btnClose]}
-            activeOpacity={0.8}
+    <SafeAreaView style={styles.safeArea}>
+      <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
+      <View style={styles.container}>
+        {/* ================= MAP SECTION (Top 325px) ================= */}
+        <View style={styles.mapContainer}>
+          <Map
+            style={styles.map}
+            mapStyle={MAP_STYLE_URL}
+            logo={false}
+            attribution={false}
           >
-            <Text style={styles.closeIcon}>✕</Text>
-          </TouchableOpacity>
+            {/* initialViewState sets starting zoom and center position */}
+            <Camera
+              ref={cameraRef}
+              initialViewState={{
+                center: [
+                  (carLocation[0] + homeLocation[0]) / 2,
+                  (carLocation[1] + homeLocation[1]) / 2,
+                ],
+                zoom: INITIAL_ZOOM,
+              }}
+            />
 
-          <View style={styles.headerActions}>
-            <TouchableOpacity
-              onPress={() =>
-                Alert.alert(
-                  'Driver Support',
-                  'Contacting 24/7 Driver Dispatch Helpline: +91 1800 987 6543',
-                )
-              }
-              activeOpacity={0.8}
-            >
-              <View style={styles.btn}>
-                <Text style={styles.btnText}>Help</Text>
+            {/* ROUTE LINE — black, thick, rounded joins/caps following roads */}
+            <GeoJSONSource id="driverRouteSource" data={routeGeoJSON}>
+              <Layer
+                id="driverRouteLine"
+                type="line"
+                paint={{
+                  'line-color': '#111111',
+                  'line-width': 4,
+                  'line-join': 'round',
+                  'line-cap': 'round',
+                }}
+              />
+            </GeoJSONSource>
+
+            {/* 🏠 STATIONARY CUSTOMER HOME MARKER (Fixed Destination) */}
+            <Marker id="home-marker" lngLat={homeLocation}>
+              <View style={styles.blackMarker}>
+                <Text style={styles.markerIcon}>⌂</Text>
               </View>
-            </TouchableOpacity>
+            </Marker>
 
+            {/* 🚗 MOVING CAR MARKER (Moves every 10s along road & restarts from 3.5km away) */}
+            <Marker id="car-marker" lngLat={carLocation}>
+              <View style={styles.blackMarker}>
+                <Text style={styles.markerIcon}>🚗</Text>
+              </View>
+            </Marker>
+          </Map>
+
+          {/* ================= MAP HEADER ================= */}
+          <View style={styles.mapHeader} pointerEvents="box-none">
             <TouchableOpacity
-              onPress={recenterMap}
-              style={[styles.btn, styles.btnClose]}
+              style={styles.closeButton}
+              onPress={() => navigation?.goBack?.()}
               activeOpacity={0.8}
             >
-              <Text style={styles.navIcon}>➤</Text>
+              <Text style={styles.closeIcon}>✕</Text>
             </TouchableOpacity>
-          </View>
-        </View>
-      </SafeAreaView>
 
-      <MapView
-        ref={mapRef}
-        provider={PROVIDER_GOOGLE}
-        style={styles.map}
-        initialRegion={{
-          latitude: driverCoord.latitude - 0.015,
-          longitude: driverCoord.longitude,
-          latitudeDelta: 0.08,
-          longitudeDelta: 0.08,
-        }}
-        onMapReady={recenterMap}
-        zoomEnabled={true}
-        scrollEnabled={true}
-      >
-        <Marker coordinate={pickupCoord} title="Pickup Point" description="Kalapet Beach Road">
-          <View style={[styles.marker, styles.markerPickup]}>
-            <Text style={styles.markerIcon}>📍</Text>
-          </View>
-        </Marker>
-
-        <Marker coordinate={dropCoord} title="Drop Point" description="Pondicherry White Town">
-          <View style={[styles.marker, styles.markerDrop]}>
-            <Text style={styles.markerIcon}>🏠</Text>
-          </View>
-        </Marker>
-
-        <MarkerAnimated
-          coordinate={animatedDriverCoord}
-          title="Your Vehicle Location"
-          description={`Speed: ${speed} km/h • Broadcast Active`}
-        >
-          <View style={[styles.marker, styles.markerDriver]}>
-            <Text style={styles.markerIcon}>🚗</Text>
-          </View>
-        </MarkerAnimated>
-
-        <Polyline coordinates={ROUTE_COORDINATES} strokeColor="#0F172A" strokeWidth={4} />
-      </MapView>
-
-      <SafeAreaView style={styles.sheet}>
-        <View style={styles.sheetHeader}>
-          <Text style={styles.sheetTitle}>
-            {hasArrived ? 'Arrived at destination' : 'Trip in progress'}
-          </Text>
-          <Text style={styles.sheetSubtitle}>
-            {hasArrived ? 'Ready to complete trip' : 'En route to drop-off'}
-            <Text style={styles.speedBadge}>{` • ${speed} km/h`}</Text>
-            <Text style={styles.broadcastTag}>
-              {isBroadcasting ? ' • 📡 LIVE GPS' : ' • ⏸️ PAUSED'}
-            </Text>
-          </Text>
-        </View>
-
-        <View style={styles.sheetSection}>
-          <View style={styles.sectionInfo}>
-            <Text style={styles.sectionTitle}>Passenger</Text>
-            <Text style={styles.sectionSubtitle}>{customerName} • +91 98765 43210</Text>
-          </View>
-
-          <TouchableOpacity onPress={toggleBroadcast} activeOpacity={0.8}>
-            <View style={[styles.btnSm, isBroadcasting ? styles.btnSmActive : styles.btnSmInactive]}>
-              <Text
-                style={[
-                  styles.btnSmText,
-                  isBroadcasting ? styles.btnSmTextActive : styles.btnSmTextInactive,
-                ]}
+            <View style={styles.headerRight}>
+              <TouchableOpacity
+                style={styles.helpPill}
+                onPress={() =>
+                  Alert.alert(
+                    'Driver Dispatch Helpline',
+                    'Contacting 24/7 Driver Support: +91 1800 987 6543',
+                  )
+                }
+                activeOpacity={0.8}
               >
-                {isBroadcasting ? 'GPS ON' : 'PAUSED'}
+                <Text style={styles.helpText}>Help</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.compassButton}
+                onPress={recenterMap}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.compassIcon}>➤</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+
+        {/* ================= BOTTOM DETAILS ================= */}
+        <ScrollView
+          style={styles.bottomContainer}
+          showsVerticalScrollIndicator={false}
+          bounces={false}
+        >
+          {/* ================= DELIVERY CARD ================= */}
+          <View style={styles.deliveryCard}>
+            <View style={styles.deliveryInfo}>
+              <Text style={styles.deliveryTitle}>{destinationTitle}</Text>
+              <Text style={styles.deliverySubtitle}>
+                Passenger Pickup • 12 min Estimated
               </Text>
             </View>
-          </TouchableOpacity>
 
-          <TouchableOpacity
-            onPress={openCall}
-            style={[styles.btnSm, styles.btnIconOnly, styles.callBtn]}
-            activeOpacity={0.8}
-          >
-            <Text style={styles.actionEmoji}>📞</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            onPress={openChat}
-            style={[styles.btnSm, styles.btnIconOnly, styles.chatBtn]}
-            activeOpacity={0.8}
-          >
-            <Text style={styles.actionEmoji}>💬</Text>
-          </TouchableOpacity>
-        </View>
-
-        <View style={styles.sheetSection}>
-          <View style={styles.sectionInfo}>
-            <Text style={styles.sectionTitle}>Drop-off Location</Text>
-            <Text style={styles.sectionSubtitle} numberOfLines={1}>
-              Pondicherry White Town • Fare: 350 INR
-            </Text>
+            <TouchableOpacity
+              style={styles.deliveryArrow}
+              onPress={recenterMap}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.deliveryArrowText}>➤</Text>
+            </TouchableOpacity>
           </View>
 
-          <TouchableOpacity onPress={handleTripDetails} style={styles.btnSm} activeOpacity={0.8}>
-            <Text style={styles.btnSmText}>Details</Text>
-          </TouchableOpacity>
-        </View>
+          {/* ================= PASSENGER / CUSTOMER CARD ================= */}
+          <View style={styles.driverCard}>
+            <Image
+              source={{ uri: 'https://i.pravatar.cc/150?img=47' }}
+              style={styles.driverImage}
+            />
 
-        <View style={styles.sectionFooter}>
-          <TouchableOpacity onPress={handleCompleteTrip} activeOpacity={0.8}>
-            <View style={styles.btnPrimary}>
-              <Text style={styles.btnPrimaryText}>Arrived & Complete Trip</Text>
+            <View style={styles.driverInfo}>
+              <Text style={styles.driverName}>{customerName}</Text>
+              <Text style={styles.driverRole}>Passenger</Text>
             </View>
-          </TouchableOpacity>
 
-          <TouchableOpacity onPress={() => navigation.goBack()} activeOpacity={0.8}>
-            <View style={styles.btnEmpty}>
-              <Text style={styles.btnEmptyText}>Minimize Map</Text>
+            <TouchableOpacity
+              style={styles.driverButton}
+              onPress={openChat}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.chatIcon}>💬</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.driverButton}
+              onPress={openCall}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.callIcon}>📞</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* ================= REVIEW ORDER ================= */}
+          <View style={styles.reviewContainer}>
+            <View style={styles.reviewHeader}>
+              <Text style={styles.reviewTitle}>Review Order</Text>
+              <TouchableOpacity
+                onPress={() =>
+                  Alert.alert(
+                    'Trip Details',
+                    `Booking: ${bookingNumber}\nPassenger: ${customerName}\nStatus: Live GPS Dispatch Active\nFare: ₹350`,
+                  )
+                }
+              >
+                <Text style={styles.seeDetails}>See Details</Text>
+              </TouchableOpacity>
             </View>
-          </TouchableOpacity>
-        </View>
-      </SafeAreaView>
-    </View>
+
+            <Text style={styles.label}>Booking Number</Text>
+            <Text style={styles.bookingNumber}>{bookingNumber}</Text>
+
+            <View style={styles.addressRow}>
+              <View style={styles.addressColumn}>
+                <Text style={styles.label}>From</Text>
+                <Text style={styles.addressText}>{originCity}</Text>
+              </View>
+
+              <View style={styles.addressColumn}>
+                <Text style={styles.label}>To</Text>
+                <Text style={styles.addressText}>{destinationCity}</Text>
+              </View>
+
+              <View style={styles.addressColumn}>
+                <Text style={styles.label}>Created</Text>
+                <Text style={styles.addressText}>{createdDate}</Text>
+              </View>
+            </View>
+          </View>
+
+          {/* ================= TRACKING ORDER ================= */}
+          <View style={styles.trackingContainer}>
+            <Text style={styles.trackingTitle}>Tracking Order</Text>
+
+            {/* STEP 1 */}
+            <View style={styles.stepRow}>
+              <View style={styles.timelineColumn}>
+                <View style={styles.activeDot} />
+                <View style={styles.timelineLine} />
+              </View>
+
+              <View style={styles.stepContent}>
+                <Text style={styles.stepTitle}>Moving From O Tempora</Text>
+                <Text style={styles.stepDate}>June 6, 2025 02:00 AM</Text>
+              </View>
+            </View>
+
+            {/* STEP 2 */}
+            <View style={styles.stepRow}>
+              <View style={styles.timelineColumn}>
+                <View style={styles.activeDot} />
+              </View>
+
+              <View style={styles.stepContent}>
+                <Text style={styles.stepTitle}>
+                  In Transit to Warehouse Mason
+                </Text>
+                <Text style={styles.stepDate}>June 6, 2025 02:00 PM</Text>
+              </View>
+            </View>
+          </View>
+
+          {/* MapButton for External Google Maps Navigation */}
+          <MapButton homeLocation={homeLocation} carLocation={carLocation} />
+        </ScrollView>
+      </View>
+    </SafeAreaView>
   );
 }
 
+/* ================================================= */
+/* STYLES */
+/* ================================================= */
+
 const styles = StyleSheet.create({
-  map: { flex: 1, position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: -1 },
-  marker: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    alignItems: 'center',
-    justifyContent: 'center',
-    elevation: 6,
-    shadowColor: '#000',
-    shadowOpacity: 0.25,
-    shadowRadius: 4,
-    shadowOffset: { width: 0, height: 2 },
+  safeArea: {
+    flex: 1,
+    backgroundColor: '#FFFFFF',
   },
-  markerPickup: { backgroundColor: '#2563EB' },
-  markerDrop: { backgroundColor: '#059669' },
-  markerDriver: { backgroundColor: '#DC2626', width: 40, height: 40, borderRadius: 20 },
-  markerIcon: { fontSize: 18 },
-  topSafeArea: { backgroundColor: 'transparent' },
-  header: {
+  container: {
+    flex: 1,
+    backgroundColor: '#FFFFFF',
+  },
+  /* ================= MAP ================= */
+  mapContainer: {
+    height: 325,
+    position: 'relative',
+  },
+  map: {
+    flex: 1,
+  },
+  /* ================= HEADER ================= */
+  mapHeader: {
+    position: 'absolute',
+    top: 15,
+    left: 12,
+    right: 12,
     flexDirection: 'row',
     alignItems: 'flex-start',
     justifyContent: 'space-between',
-    paddingHorizontal: 14,
-    paddingTop: 12,
   },
-  headerActions: { alignItems: 'flex-end' },
-  btn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: 9999,
-    paddingVertical: 8,
-    paddingHorizontal: 16,
-    borderWidth: 1,
+  closeButton: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
     backgroundColor: '#FFFFFF',
-    borderColor: '#E2E8F0',
-    marginBottom: 8,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.15,
-    shadowRadius: 3,
-    elevation: 4,
-  },
-  btnClose: { width: 42, height: 42, paddingHorizontal: 0 },
-  closeIcon: { fontSize: 16, fontWeight: '800', color: '#0F172A' },
-  navIcon: { fontSize: 16, fontWeight: '800', color: '#2563EB', transform: [{ rotate: '-45deg' }] },
-  btnText: { fontSize: 14, fontWeight: '800', color: '#0F172A', letterSpacing: 0.3 },
-  btnSm: {
-    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 9999,
-    paddingVertical: 8,
-    paddingHorizontal: 14,
-    borderWidth: 1,
-    backgroundColor: '#F1F5F9',
-    borderColor: '#E2E8F0',
-    marginLeft: 6,
-  },
-  btnSmActive: { backgroundColor: '#DCFCE7', borderColor: '#86EFAC' },
-  btnSmInactive: { backgroundColor: '#FEE2E2', borderColor: '#FCA5A5' },
-  btnSmText: { fontSize: 13, fontWeight: '700', color: '#0F172A' },
-  btnSmTextActive: { color: '#16A34A' },
-  btnSmTextInactive: { color: '#DC2626' },
-  btnIconOnly: { width: 40, height: 40, paddingHorizontal: 0, borderRadius: 20 },
-  callBtn: { backgroundColor: '#EFF6FF', borderColor: '#BFDBFE' },
-  chatBtn: { backgroundColor: '#ECFDF5', borderColor: '#A7F3D0' },
-  actionEmoji: { fontSize: 16 },
-  btnPrimary: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: 12,
-    paddingVertical: 14,
-    paddingHorizontal: 16,
-    backgroundColor: '#16A34A',
-    elevation: 3,
-    shadowColor: '#16A34A',
-    shadowOpacity: 0.3,
-    shadowRadius: 6,
-    shadowOffset: { width: 0, height: 2 },
-  },
-  btnPrimaryText: { fontSize: 16, fontWeight: '800', color: '#FFFFFF', letterSpacing: 0.5 },
-  btnEmpty: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: 12,
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-    backgroundColor: 'transparent',
-    marginTop: 4,
-  },
-  btnEmptyText: { fontSize: 14, fontWeight: '700', color: '#64748B' },
-  sheet: {
-    marginTop: 'auto',
-    backgroundColor: '#FFFFFF',
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    paddingBottom: 20,
-    elevation: 16,
+    elevation: 5,
     shadowColor: '#000',
     shadowOpacity: 0.15,
-    shadowRadius: 16,
-    shadowOffset: { width: 0, height: -4 },
-    borderWidth: 1,
-    borderColor: '#F1F5F9',
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 2 },
   },
-  sheetHeader: { paddingHorizontal: 20, paddingTop: 16, paddingBottom: 12, borderBottomWidth: 1, borderColor: '#F1F5F9' },
-  sheetTitle: { fontSize: 20, fontWeight: '800', color: '#0F172A', marginBottom: 2 },
-  sheetSubtitle: { fontSize: 13, fontWeight: '500', color: '#64748B' },
-  speedBadge: { color: '#059669', fontWeight: '700' },
-  broadcastTag: { color: '#2563EB', fontWeight: '700' },
-  sheetSection: {
-    flexDirection: 'row',
-    alignItems: 'center',
+  closeIcon: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#222222',
+  },
+  headerRight: {
+    alignItems: 'flex-end',
+  },
+  helpPill: {
+    backgroundColor: '#FFFFFF',
     paddingHorizontal: 20,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderColor: '#F1F5F9',
+    paddingVertical: 11,
+    borderRadius: 22,
+    elevation: 5,
+    shadowColor: '#000',
+    shadowOpacity: 0.15,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 2 },
+    marginBottom: 8,
   },
-  sectionInfo: { flex: 1, marginRight: 10 },
-  sectionTitle: { fontSize: 15, fontWeight: '800', color: '#0F172A', marginBottom: 2 },
-  sectionSubtitle: { fontSize: 12, color: '#64748B', fontWeight: '500' },
-  sectionFooter: { paddingHorizontal: 20, paddingTop: 12 },
+  helpText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#252525',
+  },
+  compassButton: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    elevation: 5,
+    shadowColor: '#000',
+    shadowOpacity: 0.15,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 2 },
+  },
+  compassIcon: {
+    fontSize: 15,
+    color: '#315BC7',
+    transform: [{ rotate: '45deg' }],
+  },
+  /* ================= MARKERS ================= */
+  blackMarker: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: '#111111',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
+    elevation: 5,
+    shadowColor: '#000',
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 2 },
+  },
+  markerIcon: {
+    fontSize: 16,
+    color: '#FFFFFF',
+  },
+  /* ================= BOTTOM ================= */
+  bottomContainer: {
+    flex: 1,
+    backgroundColor: '#FFFFFF',
+  },
+  /* ================= DELIVERY ================= */
+  deliveryCard: {
+    minHeight: 64,
+    backgroundColor: '#315BC7',
+    paddingHorizontal: 13,
+    paddingVertical: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  deliveryInfo: {
+    flex: 1,
+  },
+  deliveryTitle: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  deliverySubtitle: {
+    color: '#E3E8FF',
+    fontSize: 10,
+    marginTop: 3,
+  },
+  deliveryArrow: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  deliveryArrowText: {
+    color: '#315BC7',
+    fontSize: 15,
+  },
+  /* ================= PASSENGER ================= */
+  driverCard: {
+    height: 68,
+    marginHorizontal: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderBottomWidth: 1,
+    borderBottomColor: '#EEEEEE',
+  },
+  driverImage: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+  },
+  driverInfo: {
+    flex: 1,
+    marginLeft: 10,
+  },
+  driverName: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#252525',
+  },
+  driverRole: {
+    fontSize: 10,
+    color: '#888888',
+    marginTop: 2,
+  },
+  driverButton: {
+    width: 38,
+    height: 38,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  chatIcon: {
+    fontSize: 18,
+    color: '#333333',
+  },
+  callIcon: {
+    fontSize: 18,
+    color: '#333333',
+  },
+  /* ================= REVIEW ================= */
+  reviewContainer: {
+    paddingHorizontal: 12,
+    paddingTop: 14,
+  },
+  reviewHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  reviewTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#252525',
+  },
+  seeDetails: {
+    fontSize: 9,
+    color: '#5368C5',
+  },
+  label: {
+    fontSize: 8,
+    color: '#8A8A8A',
+    marginTop: 7,
+  },
+  bookingNumber: {
+    fontSize: 11,
+    color: '#333333',
+    marginTop: 2,
+  },
+  addressRow: {
+    flexDirection: 'row',
+    marginTop: 3,
+  },
+  addressColumn: {
+    flex: 1,
+  },
+  addressText: {
+    fontSize: 9,
+    color: '#333333',
+    marginTop: 2,
+  },
+  /* ================= TRACKING ================= */
+  trackingContainer: {
+    paddingHorizontal: 12,
+    paddingTop: 16,
+    paddingBottom: 20,
+  },
+  trackingTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#252525',
+    marginBottom: 10,
+  },
+  stepRow: {
+    flexDirection: 'row',
+    minHeight: 48,
+  },
+  timelineColumn: {
+    width: 18,
+    alignItems: 'center',
+  },
+  activeDot: {
+    width: 9,
+    height: 9,
+    borderRadius: 5,
+    backgroundColor: '#315BC7',
+    marginTop: 3,
+  },
+  timelineLine: {
+    width: 1,
+    flex: 1,
+    backgroundColor: '#D6D6D6',
+    marginTop: 3,
+  },
+  stepContent: {
+    flex: 1,
+    paddingLeft: 3,
+  },
+  stepTitle: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: '#333333',
+  },
+  stepDate: {
+    fontSize: 8,
+    color: '#999999',
+    marginTop: 3,
+  },
 });

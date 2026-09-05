@@ -3,6 +3,7 @@ import { View, Text, TouchableOpacity, StyleSheet, Alert } from "react-native";
 
 import WebRTCService from "../services/WebRTCService";
 import SocketService from "../services/SocketService";
+import NativeSocketService from "../services/NativeSocketService";
 
 const CustomerAnswerCallScreen = ({ route, navigation }) => {
   const { callerId, callerName, userId = "customer_101" } = route.params || {};
@@ -13,18 +14,27 @@ const CustomerAnswerCallScreen = ({ route, navigation }) => {
   const [speaker, setSpeaker] = useState(false);
 
   // -----------------------------
-  // CALL TIMER
+  // CALL TIMER & LIFECYCLE
   // -----------------------------
 
   useEffect(() => {
+    NativeSocketService.cancelCallNotification?.();
+    NativeSocketService.clearInitialNotification?.();
+
     const timer = setInterval(() => {
       setSeconds((prev) => prev + 1);
     }, 1000);
 
     const handleCallEnded = () => {
       console.log("🛑 Call ended by remote party");
+      NativeSocketService.cancelCallNotification?.();
+      NativeSocketService.clearInitialNotification?.();
       WebRTCService.close();
-      navigation.goBack();
+      if (navigation.canGoBack()) {
+        navigation.goBack();
+      } else {
+        navigation.navigate("CustomerHomeScreen");
+      }
     };
 
     SocketService.onCallEnded(handleCallEnded);
@@ -32,6 +42,8 @@ const CustomerAnswerCallScreen = ({ route, navigation }) => {
     return () => {
       clearInterval(timer);
       SocketService.off("callEnded", handleCallEnded);
+      NativeSocketService.cancelCallNotification?.();
+      NativeSocketService.clearInitialNotification?.();
     };
   }, [navigation]);
 
@@ -96,6 +108,9 @@ const CustomerAnswerCallScreen = ({ route, navigation }) => {
         style: "destructive",
         onPress: async () => {
           try {
+            NativeSocketService.cancelCallNotification?.();
+            NativeSocketService.clearInitialNotification?.();
+
             SocketService.endCall({
               senderId: userId || SocketService.currentUserId || "customer_101",
               receiverId: callerId,
@@ -106,7 +121,11 @@ const CustomerAnswerCallScreen = ({ route, navigation }) => {
             console.log("END CALL ERROR:", error);
           }
 
-          navigation.goBack();
+          if (navigation.canGoBack()) {
+            navigation.goBack();
+          } else {
+            navigation.navigate("CustomerHomeScreen");
+          }
         },
       },
     ]);

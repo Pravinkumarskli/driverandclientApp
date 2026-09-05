@@ -15,7 +15,7 @@ import MapView, {
   AnimatedRegion,
   MarkerAnimated,
 } from 'react-native-maps';
-
+import MapButton from './MapButton'
 import SocketService from '../services/SocketService';
 
 // Route coordinates connecting Kalapet Beach to Pondicherry White Town
@@ -366,6 +366,7 @@ export default function DriverTrackingScreen({ route, navigation }) {
             </View>
           </TouchableOpacity>
         </View>
+        <MapButton/>
       </SafeAreaView>
     </View>
   );

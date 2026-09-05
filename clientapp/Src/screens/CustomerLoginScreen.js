@@ -56,6 +56,45 @@ export default function CustomerLoginScreen({ navigation }) {
           );
           SocketService.connect(savedSession.userId);
           setIsConnecting(false);
+
+          // Check if there was a launch notification that opened the app
+          const initialNotif = await NativeSocketService.getInitialNotificationData();
+          if (initialNotif && isMounted) {
+            console.log("🔔 [AUTO-LOGIN CUSTOMER] Routing directly from launch notification:", initialNotif);
+            await NativeSocketService.clearInitialNotificationData();
+
+            if (initialNotif.action === "INCOMING_CALL" || initialNotif.callerId) {
+              let parsedOffer = null;
+              if (initialNotif.offer) {
+                try {
+                  parsedOffer =
+                    typeof initialNotif.offer === "string"
+                      ? JSON.parse(initialNotif.offer)
+                      : initialNotif.offer;
+                } catch (e) {
+                  parsedOffer = initialNotif.offer;
+                }
+              }
+              navigation.replace("CustomerIncomingCall", {
+                callerId: initialNotif.callerId || initialNotif.senderId,
+                callerName: initialNotif.callerName || initialNotif.receiverName || "Driver",
+                receiverId: savedSession.userId,
+                receiverName: savedSession.userName || "Customer",
+                offer: parsedOffer,
+                autoAnswer: initialNotif.autoAnswer === true,
+              });
+              return;
+            } else if (initialNotif.action === "OPEN_CHAT" || initialNotif.senderId) {
+              navigation.replace("CustomerChat", {
+                userId: savedSession.userId,
+                receiverId: initialNotif.senderId,
+                receiverName: initialNotif.receiverName || "Driver",
+                messageId: initialNotif.messageId || "",
+              });
+              return;
+            }
+          }
+
           navigation.replace("CustomerHomeScreen", {
             userId: savedSession.userId,
             userName: savedSession.userName || savedSession.userId,
@@ -105,6 +144,41 @@ export default function CustomerLoginScreen({ navigation }) {
       SocketService.connect(finalId);
 
       setIsConnecting(false);
+
+      const initialNotif = await NativeSocketService.getInitialNotificationData();
+      if (initialNotif) {
+        await NativeSocketService.clearInitialNotificationData();
+        if (initialNotif.action === "INCOMING_CALL" || initialNotif.callerId) {
+          let parsedOffer = null;
+          if (initialNotif.offer) {
+            try {
+              parsedOffer =
+                typeof initialNotif.offer === "string"
+                  ? JSON.parse(initialNotif.offer)
+                  : initialNotif.offer;
+            } catch (e) {
+              parsedOffer = initialNotif.offer;
+            }
+          }
+          navigation.replace("CustomerIncomingCall", {
+            callerId: initialNotif.callerId || initialNotif.senderId,
+            callerName: initialNotif.callerName || initialNotif.receiverName || "Driver",
+            receiverId: finalId,
+            receiverName: finalName,
+            offer: parsedOffer,
+            autoAnswer: initialNotif.autoAnswer === true,
+          });
+          return;
+        } else if (initialNotif.action === "OPEN_CHAT" || initialNotif.senderId) {
+          navigation.replace("CustomerChat", {
+            userId: finalId,
+            receiverId: initialNotif.senderId,
+            receiverName: initialNotif.receiverName || "Driver",
+            messageId: initialNotif.messageId || "",
+          });
+          return;
+        }
+      }
 
       navigation.replace("CustomerHomeScreen", {
         userId: finalId,

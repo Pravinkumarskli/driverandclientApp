@@ -214,6 +214,13 @@ class SocketService {
     this.socket.emit("stopTracking", { customerId });
   }
 
+  sendCustomerLocation(locationData) {
+    this.socket?.emit("customerLocation", {
+      customerId: this.currentUserId,
+      ...locationData,
+    });
+  }
+
   onDriverLocation(callback) {
     this.on("driverLocationUpdate", callback);
   }

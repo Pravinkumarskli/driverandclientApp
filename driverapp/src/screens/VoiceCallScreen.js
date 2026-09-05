@@ -13,6 +13,7 @@ import {
 
 import SocketService from "../services/SocketService";
 import WebRTCService from "../services/WebRTCService";
+import NativeSocketService from "../services/NativeSocketService";
 
 export default function VoiceCallScreen({ route, navigation }) {
   const {
@@ -32,6 +33,9 @@ export default function VoiceCallScreen({ route, navigation }) {
 
   // Call duration timer
   useEffect(() => {
+    NativeSocketService.cancelCallNotification?.();
+    NativeSocketService.clearInitialNotification?.();
+
     if (connected) {
       timerRef.current = setInterval(() => {
         setCallSeconds((s) => s + 1);
@@ -63,6 +67,9 @@ export default function VoiceCallScreen({ route, navigation }) {
 
   useEffect(() => {
     let isMounted = true;
+
+    NativeSocketService.cancelCallNotification?.();
+    NativeSocketService.clearInitialNotification?.();
 
     const setupVoiceCall = async () => {
       try {
@@ -139,18 +146,36 @@ export default function VoiceCallScreen({ route, navigation }) {
           }
         });
 
+        const safeGoBack = () => {
+          NativeSocketService.cancelCallNotification?.();
+          NativeSocketService.clearInitialNotification?.();
+
+          if (navigation.canGoBack()) {
+            navigation.goBack();
+          } else {
+            navigation.navigate("DriverHome");
+          }
+        };
+
         // 5. Listen for Call Ended from Customer
         SocketService.onCallEnded(() => {
           console.log("🛑 [DRIVER] Customer ended call");
           if (isMounted) {
             setCallStatus("Call Ended");
-            setTimeout(() => navigation.goBack(), 800);
+            setTimeout(() => safeGoBack(), 800);
           }
         });
       } catch (err) {
         console.error("[DRIVER] VOICE CALL ERROR:", err);
         Alert.alert("Call Error", err?.message || "Failed to connect call");
-        navigation.goBack();
+        NativeSocketService.cancelCallNotification?.();
+        NativeSocketService.clearInitialNotification?.();
+
+        if (navigation.canGoBack()) {
+          navigation.goBack();
+        } else {
+          navigation.navigate("DriverHome");
+        }
       }
     };
 
@@ -162,6 +187,8 @@ export default function VoiceCallScreen({ route, navigation }) {
       SocketService.off("offer");
       SocketService.off("iceCandidate");
       SocketService.off("callEnded");
+      NativeSocketService.cancelCallNotification?.();
+      NativeSocketService.clearInitialNotification?.();
     };
   }, [callerId, navigation, offer, receiverId]);
 
@@ -179,12 +206,19 @@ export default function VoiceCallScreen({ route, navigation }) {
 
   const handleEndCall = () => {
     console.log("🛑 [DRIVER] Ending call");
+    NativeSocketService.cancelCallNotification?.();
+    NativeSocketService.clearInitialNotification?.();
+
     SocketService.endCall({
       senderId: receiverId,
       receiverId: callerId,
     });
     WebRTCService.close();
-    navigation.goBack();
+    if (navigation.canGoBack()) {
+      navigation.goBack();
+    } else {
+      navigation.navigate("DriverHome");
+    }
   };
 
   return (

@@ -55,39 +55,56 @@ class SocketForegroundService : Service(), NativeWebSocketManager.SocketEventLis
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = intent?.action
+        val prefs = getSharedPreferences("CabCustomerSocketPrefs", Context.MODE_PRIVATE)
 
-        if (action == ACTION_START) {
-            val url = intent.getStringExtra(EXTRA_URL) ?: ""
-            val userId = intent.getStringExtra(EXTRA_USER_ID) ?: ""
-            val userType = intent.getStringExtra(EXTRA_USER_TYPE) ?: "client"
-
-            try {
-                val notification = notificationHelper.buildForegroundNotification("Connecting to driver service...")
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    var foregroundType = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                        // Android 14+
-                        foregroundType = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC or ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING
-                    }
-                    startForeground(
-                        NotificationHelper.FOREGROUND_NOTIFICATION_ID,
-                        notification,
-                        foregroundType
-                    )
-                } else {
-                    startForeground(
-                        NotificationHelper.FOREGROUND_NOTIFICATION_ID,
-                        notification
-                    )
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to startForeground: ${e.message}", e)
-            }
-
-            isServiceRunning = true
-            webSocketManager?.start(url, userId, userType)
-        } else if (action == ACTION_STOP) {
+        if (action == ACTION_STOP) {
             stopServiceInternal()
+            return START_NOT_STICKY
+        }
+
+        var url = intent?.getStringExtra(EXTRA_URL)
+        var userId = intent?.getStringExtra(EXTRA_USER_ID)
+        var userType = intent?.getStringExtra(EXTRA_USER_TYPE)
+
+        if (url.isNullOrEmpty() || userId.isNullOrEmpty()) {
+            url = prefs.getString("KEY_URL", "") ?: ""
+            userId = prefs.getString("KEY_USER_ID", "customer_101") ?: "customer_101"
+            userType = prefs.getString("KEY_USER_TYPE", "client") ?: "client"
+            Log.d(TAG, "Restored state from SharedPreferences: url=$url, userId=$userId, userType=$userType")
+        } else {
+            prefs.edit()
+                .putString("KEY_URL", url)
+                .putString("KEY_USER_ID", userId)
+                .putString("KEY_USER_TYPE", userType)
+                .apply()
+        }
+
+        try {
+            val notification = notificationHelper.buildForegroundNotification("Connected to driver & live tracking")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                var foregroundType = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    // Android 14+
+                    foregroundType = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC or ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING
+                }
+                startForeground(
+                    NotificationHelper.FOREGROUND_NOTIFICATION_ID,
+                    notification,
+                    foregroundType
+                )
+            } else {
+                startForeground(
+                    NotificationHelper.FOREGROUND_NOTIFICATION_ID,
+                    notification
+                )
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to startForeground: ${e.message}", e)
+        }
+
+        isServiceRunning = true
+        if (url.isNotEmpty()) {
+            webSocketManager?.start(url, userId, userType ?: "client")
         }
 
         return START_STICKY
@@ -106,51 +123,58 @@ class SocketForegroundService : Service(), NativeWebSocketManager.SocketEventLis
 
     override fun onBind(intent: Intent?): IBinder = binder
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        Log.d(TAG, "CustomerApp task removed (swiped away). Keeping background service active.")
+        isAppInForeground = false
+        clientListener = null
+    }
+
     override fun onMessageReceived(messageJson: String) {
+        Log.d(TAG, "📩 onMessageReceived: ${messageJson.take(120)}")
         // 1. Forward directly to React Native JavaScript layer
         clientListener?.onMessageReceived(messageJson)
 
-        // 2. Show notification when app is backgrounded or JS runtime is detached
-        if (!isAppInForeground || clientListener == null) {
-            try {
-                acquireWakeLock(10000)
-                val json = JSONObject(messageJson)
-                val eventType = json.optString("type", "")
+        // 2. Display notification for chat messages and incoming calls
+        try {
+            acquireWakeLock(15000)
+            val json = JSONObject(messageJson)
+            val eventType = json.optString("type", "")
 
-                if (eventType == "chat" || eventType == "receiveMessage") {
-                    val senderId = json.optString("senderId", "Driver")
-                    val senderName = json.optString("senderName", senderId)
-                    val message = json.optString("message", "New message received")
-                    val conversationId = json.optString("conversationId", "")
-                    val userType = json.optString("senderType", "driver")
-                    val messageId = json.optString("messageId", json.optString("id", ""))
+            if (eventType == "chat" || eventType == "receiveMessage") {
+                val senderId = json.optString("senderId", "Driver")
+                val senderName = json.optString("senderName", senderId)
+                val message = json.optString("message", "New message received")
+                val conversationId = json.optString("conversationId", "")
+                val userType = json.optString("senderType", "driver")
+                val messageId = json.optString("messageId", json.optString("id", ""))
 
-                    notificationHelper.showMessageNotification(
-                        senderId = senderId,
-                        senderName = senderName,
-                        messageText = message,
-                        conversationId = conversationId,
-                        userType = userType,
-                        messageId = messageId
-                    )
-                } else if (eventType == "incomingCall" || eventType == "callUser") {
-                    val callerId = json.optString("callerId", json.optString("senderId", "Driver"))
-                    val callerName = json.optString("callerName", json.optString("senderName", "Driver"))
-                    val userType = json.optString("userType", json.optString("senderType", "driver"))
-                    val offerJson = json.optString("offer", "")
+                notificationHelper.showMessageNotification(
+                    senderId = senderId,
+                    senderName = senderName,
+                    messageText = message,
+                    conversationId = conversationId,
+                    userType = userType,
+                    messageId = messageId
+                )
+            } else if (eventType == "incomingCall" || eventType == "callUser") {
+                val callerId = json.optString("callerId", json.optString("senderId", "Driver"))
+                val callerName = json.optString("callerName", json.optString("senderName", "Driver"))
+                val userType = json.optString("userType", json.optString("senderType", "driver"))
+                val offerObj = json.opt("offer")
+                val offerJson = if (offerObj != null && offerObj != org.json.JSONObject.NULL) offerObj.toString() else ""
 
-                    notificationHelper.showIncomingCallNotification(
-                        callerId = callerId,
-                        callerName = callerName,
-                        userType = userType,
-                        offerJson = offerJson
-                    )
-                } else if (eventType == "endCall" || eventType == "callEnded" || eventType == "callRejected") {
-                    notificationHelper.cancelCallNotification()
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error displaying message/call notification: ${e.message}", e)
+                notificationHelper.showIncomingCallNotification(
+                    callerId = callerId,
+                    callerName = callerName,
+                    userType = userType,
+                    offerJson = offerJson
+                )
+            } else if (eventType == "endCall" || eventType == "callEnded" || eventType == "callRejected") {
+                notificationHelper.cancelCallNotification()
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error displaying message/call notification: ${e.message}", e)
         }
     }
 

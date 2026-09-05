@@ -36,32 +36,6 @@ export default function DriverHomeScreen({ route, navigation }) {
   useEffect(() => {
     SocketService.connect(driverId);
 
-    const handleNotificationRoute = (data) => {
-      if (!data) return;
-      console.log("🔔 [DRIVER NOTIFICATION OPENED]:", data);
-      if (data.action === "INCOMING_CALL" || data.callerId) {
-        navigation.navigate("IncomingCall", {
-          callerId: data.callerId || data.senderId,
-          callerName: data.callerName || data.receiverName || "Customer 101",
-          receiverId: driverId,
-          offer: data.offer || null,
-        });
-      } else if (data.action === "OPEN_CHAT" || data.senderId) {
-        navigation.navigate("DriverChat", {
-          userId: driverId,
-          receiverId: data.senderId,
-          receiverName: data.receiverName || "Customer",
-          messageId: data.messageId || "",
-        });
-      }
-    };
-
-    NativeSocketService.getInitialNotificationData()
-      .then(handleNotificationRoute)
-      .catch((error) => console.warn("Notification launch data unavailable:", error));
-
-    const unsubscribeNotification = NativeSocketService.onNotificationOpened(handleNotificationRoute);
-
     const handleIncomingCall = (data) => {
       navigation.navigate("IncomingCall", {
         callerId: data.senderId || data.callerId,
@@ -75,7 +49,6 @@ export default function DriverHomeScreen({ route, navigation }) {
 
     return () => {
       SocketService.off("incomingCall", handleIncomingCall);
-      unsubscribeNotification();
     };
   }, [driverId, navigation]);
 
@@ -92,7 +65,7 @@ export default function DriverHomeScreen({ route, navigation }) {
   };
 
   const openTracking = () => {
-    navigation.navigate("DriverTracking", {
+    navigation.navigate("Map", {
       driverId: driverId,
       customerId: activeCustomer.id,
       customerName: activeCustomer.name,

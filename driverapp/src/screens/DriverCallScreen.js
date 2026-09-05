@@ -14,6 +14,7 @@ import {
 
 import SocketService from "../services/SocketService";
 import WebRTCService from "../services/WebRTCService";
+import NativeSocketService from "../services/NativeSocketService";
 
 export default function DriverCallScreen({ route, navigation }) {
   const {
@@ -33,6 +34,11 @@ export default function DriverCallScreen({ route, navigation }) {
   const ringingTimeoutRef = useRef(null);
 
   const RINGING_TIMEOUT_MS = 40000; // 40 seconds auto-cut
+
+  useEffect(() => {
+    NativeSocketService.cancelCallNotification?.();
+    NativeSocketService.clearInitialNotification?.();
+  }, []);
 
   // Pulse animation while ringing
   useEffect(() => {
@@ -87,162 +93,347 @@ export default function DriverCallScreen({ route, navigation }) {
     }
   };
 
+  const safeGoBack = () => {
+    NativeSocketService.cancelCallNotification?.();
+    NativeSocketService.clearInitialNotification?.();
+
+    if (navigation.canGoBack()) {
+      navigation.goBack();
+    } else {
+      navigation.navigate("DriverHome");
+    }
+  };
+
+  const handleCallRejectionOrEnd = (statusText, delayMs = 1000) => {
+    WebRTCService.close();
+
+    if (ringingTimeoutRef.current) {
+      clearTimeout(ringingTimeoutRef.current);
+      ringingTimeoutRef.current = null;
+    }
+
+    setCallStatus(statusText);
+
+    setTimeout(() => {
+      safeGoBack();
+    }, delayMs);
+  };
+
   useEffect(() => {
     let isMounted = true;
 
     const startCall = async () => {
       try {
-        setCallStatus("Requesting microphone...");
+        // =====================================================
+        // 1. MICROPHONE PERMISSION
+        // =====================================================
+
+        setCallStatus('Requesting microphone...');
+
         const hasMic = await requestMicrophonePermission();
+
         if (!hasMic) {
-          Alert.alert("Permission Required", "Microphone access is needed for voice calls.");
-          navigation.goBack();
+          Alert.alert(
+            'Permission Required',
+            'Microphone access is needed for voice calls.',
+          );
+
+          safeGoBack();
           return;
         }
 
-        setCallStatus("Connecting to " + receiverName + "...");
+        // =====================================================
+        // 2. CONNECTING
+        // =====================================================
 
-        // 1. Create PeerConnection
+        setCallStatus(`Connecting to ${receiverName}...`);
+
+        // =====================================================
+        // 3. CREATE PEER CONNECTION
+        // =====================================================
+
         await WebRTCService.createPeerConnection(
+          // ICE Candidate
           (candidate) => {
-            console.log("📡 [DRIVER] Sending ICE Candidate to:", receiverId);
+            console.log(
+              '📡 [DRIVER] Sending ICE Candidate to:',
+              receiverId,
+            );
+
             SocketService.sendIceCandidate({
               senderId: userId,
               receiverId: receiverId,
               candidate: candidate,
             });
           },
+
+          // Remote Stream
           (remoteStream) => {
-            console.log("🎤 [DRIVER] Remote audio stream received!");
+            console.log(
+              '🎤 [DRIVER] Remote audio stream received!',
+            );
+
             if (isMounted) {
               setConnected(true);
-              setCallStatus("Connected");
+              setCallStatus('Connected');
+
+              // Clear ringing timeout
+              if (ringingTimeoutRef.current) {
+                clearTimeout(ringingTimeoutRef.current);
+                ringingTimeoutRef.current = null;
+              }
             }
           },
         );
 
-        // 2. Get local audio
+        // =====================================================
+        // 4. GET LOCAL AUDIO
+        // =====================================================
+
         await WebRTCService.getLocalAudio();
 
-        // 3. Create Offer
+        // =====================================================
+        // 5. CREATE OFFER
+        // =====================================================
+
         const offer = await WebRTCService.createOffer();
 
-        // 4. Send Call Signaling to Customer
-        SocketService.callUser(userId, receiverId, "Driver", offer);
+        console.log('📤 [DRIVER] Offer created');
+
+        // =====================================================
+        // 6. SEND CALL TO CUSTOMER
+        // =====================================================
+
+        SocketService.callUser(
+          userId,
+          receiverId,
+          'Driver',
+          offer,
+        );
+
         SocketService.sendOffer({
           senderId: userId,
           receiverId: receiverId,
           offer: offer,
         });
 
-        setCallStatus("Ringing...");
+        if (isMounted) {
+          setCallStatus('Ringing...');
+        }
 
-        // ── 40s Auto-Cut Timer ──────────────────────────────────
+        // =====================================================
+        // 7. 40 SECOND RINGING TIMEOUT
+        // =====================================================
+
         ringingTimeoutRef.current = setTimeout(() => {
-          if (isMounted && !connected) {
-            console.log("⏱️ [DRIVER] 40s ringing timeout — auto-cutting call");
-            setCallStatus("No Answer");
-            SocketService.endCall({
+          if (!isMounted) {
+            return;
+          }
+
+          if (!connected) {
+            console.log(
+              '⏱️ [DRIVER] 40s ringing timeout — auto-cutting call',
+            );
+
+            setCallStatus('No Answer');
+
+            // Stop WebRTC
+            WebRTCService.close();
+
+            // Tell customer that call ended
+            SocketService.endCall?.({
               senderId: userId,
               receiverId: receiverId,
             });
-            WebRTCService.close();
+
             setTimeout(() => {
-              if (isMounted) navigation.goBack();
-            }, 1500);
+              if (isMounted) {
+                safeGoBack();
+              }
+            }, 1200);
           }
         }, RINGING_TIMEOUT_MS);
 
-        // 5. Listen for WebRTC Answer
+        // =====================================================
+        // 8. REMOTE ANSWER
+        // =====================================================
+
         SocketService.onAnswer(async (data) => {
-          console.log("✅ [DRIVER] Received Answer from Customer:", data?.senderId);
+          console.log(
+            '📥 [DRIVER] Received answer from Customer:',
+            data,
+          );
+
           try {
-            if (data?.answer) {
-              await WebRTCService.setRemoteAnswer(data.answer);
+            if (!data?.answer) {
+              console.warn(
+                '⚠️ [DRIVER] Answer not found',
+              );
+              return;
             }
+
+            await WebRTCService.setRemoteAnswer(
+              data.answer,
+            );
+
+            // Clear ringing timeout
+            if (ringingTimeoutRef.current) {
+              clearTimeout(ringingTimeoutRef.current);
+              ringingTimeoutRef.current = null;
+            }
+
             if (isMounted) {
-              // Clear ringing timeout — call was answered
-              if (ringingTimeoutRef.current) {
-                clearTimeout(ringingTimeoutRef.current);
-                ringingTimeoutRef.current = null;
-              }
               setConnected(true);
-              setCallStatus("Connected");
+              setCallStatus('Connected');
             }
-          } catch (e) {
-            console.warn("Error setting remote answer:", e);
+          } catch (error) {
+            console.warn(
+              '❌ Error setting remote answer:',
+              error,
+            );
           }
         });
 
-        // 6. Listen for Call Accepted
+        // =====================================================
+        // 9. CALL ACCEPTED
+        // =====================================================
+
         SocketService.onCallAccepted(() => {
-          console.log("✅ [DRIVER] Customer accepted call!");
+          console.log(
+            '✅ [DRIVER] Customer accepted call!',
+          );
+
+          if (ringingTimeoutRef.current) {
+            clearTimeout(ringingTimeoutRef.current);
+            ringingTimeoutRef.current = null;
+          }
+
           if (isMounted) {
-            // Clear ringing timeout — call was accepted
-            if (ringingTimeoutRef.current) {
-              clearTimeout(ringingTimeoutRef.current);
-              ringingTimeoutRef.current = null;
-            }
             setConnected(true);
-            setCallStatus("Connected");
+            setCallStatus('Connected');
           }
         });
 
-      
+        // =====================================================
+        // 10. CALL REJECTED
+        // =====================================================
+
         SocketService.onCallRejected(() => {
-          console.log("❌ [DRIVER] Customer declined call");
-          if (isMounted) {
-            if (ringingTimeoutRef.current) {
-              clearTimeout(ringingTimeoutRef.current);
-              ringingTimeoutRef.current = null;
-            }
-            setCallStatus("Call Declined");
-            setTimeout(() => navigation.goBack(), 1200);
+          console.log(
+            '❌ [DRIVER] Customer declined call',
+          );
+
+          if (ringingTimeoutRef.current) {
+            clearTimeout(ringingTimeoutRef.current);
+            ringingTimeoutRef.current = null;
           }
+
+          handleCallRejectionOrEnd(
+            'Call Declined',
+            1200,
+          );
         });
 
-        // 8. Listen for Call Ended
+        // =====================================================
+        // 11. CALL ENDED
+        // =====================================================
+
         SocketService.onCallEnded(() => {
-          console.log("🛑 [DRIVER] Customer ended call");
-          if (isMounted) {
-            if (ringingTimeoutRef.current) {
-              clearTimeout(ringingTimeoutRef.current);
-              ringingTimeoutRef.current = null;
-            }
-            setCallStatus("Call Ended");
-            setTimeout(() => navigation.goBack(), 800);
+          console.log(
+            '🛑 [DRIVER] Customer ended call',
+          );
+
+          if (ringingTimeoutRef.current) {
+            clearTimeout(ringingTimeoutRef.current);
+            ringingTimeoutRef.current = null;
           }
+
+          handleCallRejectionOrEnd(
+            'Call Ended',
+            800,
+          );
         });
 
-        // 9. Listen for ICE candidates
+        // =====================================================
+        // 12. ICE CANDIDATE
+        // =====================================================
+
         SocketService.onIceCandidate(async (data) => {
-          if (data?.candidate) {
-            await WebRTCService.addIceCandidate(data.candidate);
+          try {
+            if (!data?.candidate) {
+              return;
+            }
+
+            console.log(
+              '📥 [DRIVER] Received ICE candidate',
+            );
+
+            await WebRTCService.addIceCandidate(
+              data.candidate,
+            );
+          } catch (error) {
+            console.warn(
+              '❌ Error adding ICE candidate:',
+              error,
+            );
           }
         });
       } catch (err) {
-        console.error("DRIVER CALL START ERROR:", err);
-        Alert.alert("Call Error", err?.message || "Failed to start call");
-        navigation.goBack();
+        console.error(
+          '❌ DRIVER CALL START ERROR:',
+          err,
+        );
+
+        if (isMounted) {
+          Alert.alert(
+            'Call Error',
+            err?.message || 'Failed to start call',
+          );
+        }
+
+        safeGoBack();
       }
     };
 
+    // =====================================================
+    // START CALL
+    // =====================================================
+
     startCall();
 
+    // =====================================================
+    // CLEANUP
+    // =====================================================
+
     return () => {
+      console.log(
+        '🧹 [DRIVER] Call screen cleanup',
+      );
+
       isMounted = false;
+
+      // Clear 40 sec timer
       if (ringingTimeoutRef.current) {
         clearTimeout(ringingTimeoutRef.current);
         ringingTimeoutRef.current = null;
       }
+
+      // Close WebRTC
       WebRTCService.close();
-      SocketService.off("answer");
-      SocketService.off("callAccepted");
-      SocketService.off("callRejected");
-      SocketService.off("callEnded");
-      SocketService.off("iceCandidate");
+
+      // Remove socket listeners
+      SocketService.off('answer');
+      SocketService.off('callAccepted');
+      SocketService.off('callRejected');
+      SocketService.off('callEnded');
+      SocketService.off('iceCandidate');
     };
-  }, [navigation, receiverId, receiverName, userId]);
+  }, [
+    navigation,
+    receiverId,
+    receiverName,
+    userId,
+  ]);
 
   const handleToggleMute = () => {
     const next = !isMuted;
@@ -261,7 +452,7 @@ export default function DriverCallScreen({ route, navigation }) {
       receiverId: receiverId,
     });
     WebRTCService.close();
-    navigation.goBack();
+    safeGoBack();
   };
 
   return (

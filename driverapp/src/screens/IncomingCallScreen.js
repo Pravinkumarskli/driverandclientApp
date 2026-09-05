@@ -10,6 +10,7 @@ import {
 } from "react-native";
 
 import SocketService from "../services/SocketService";
+import NativeSocketService from "../services/NativeSocketService";
 
 export default function IncomingCallScreen({ route, navigation }) {
   const {
@@ -24,6 +25,16 @@ export default function IncomingCallScreen({ route, navigation }) {
   const autoRejectTimerRef = useRef(null);
 
   const AUTO_REJECT_TIMEOUT_MS = 40000; // 40 seconds auto-reject
+
+  useEffect(() => {
+    NativeSocketService.cancelCallNotification?.();
+    NativeSocketService.clearInitialNotification?.();
+
+    if (route.params?.autoAnswer === true) {
+      console.log("⚡ [DRIVER] Auto-answering incoming call from notification action");
+      handleAccept();
+    }
+  }, []);
 
   useEffect(() => {
     // Pulsating animation for incoming ring
@@ -42,6 +53,17 @@ export default function IncomingCallScreen({ route, navigation }) {
       ]),
     ).start();
 
+    const safeGoBack = () => {
+      NativeSocketService.cancelCallNotification?.();
+      NativeSocketService.clearInitialNotification?.();
+
+      if (navigation.canGoBack()) {
+        navigation.goBack();
+      } else {
+        navigation.navigate("DriverHome");
+      }
+    };
+
     // If caller cancels or ends call while ringing
     const handleCallEnded = () => {
       console.log("🛑 Caller cancelled incoming call");
@@ -49,12 +71,11 @@ export default function IncomingCallScreen({ route, navigation }) {
         clearTimeout(autoRejectTimerRef.current);
         autoRejectTimerRef.current = null;
       }
-      navigation.goBack();
+      safeGoBack();
     };
 
     SocketService.onCallEnded(handleCallEnded);
 
-    // Auto-reject after 40 seconds if not answered
     autoRejectTimerRef.current = setTimeout(() => {
       console.log("⏱️ [DRIVER] 40s incoming call timeout — auto-rejecting");
       SocketService.rejectCall(callerId, receiverId);
@@ -62,7 +83,7 @@ export default function IncomingCallScreen({ route, navigation }) {
         senderId: receiverId,
         receiverId: callerId,
       });
-      navigation.goBack();
+      safeGoBack();
     }, AUTO_REJECT_TIMEOUT_MS);
 
     return () => {
@@ -76,6 +97,9 @@ export default function IncomingCallScreen({ route, navigation }) {
 
   const handleAccept = () => {
     console.log("📞 [DRIVER ACCEPT CALL] Accepting call from:", callerId);
+    NativeSocketService.cancelCallNotification?.();
+    NativeSocketService.clearInitialNotification?.();
+
     if (autoRejectTimerRef.current) {
       clearTimeout(autoRejectTimerRef.current);
       autoRejectTimerRef.current = null;
@@ -91,6 +115,9 @@ export default function IncomingCallScreen({ route, navigation }) {
 
   const handleDecline = () => {
     console.log("❌ [DRIVER DECLINE CALL] Declining call from:", callerId);
+    NativeSocketService.cancelCallNotification?.();
+    NativeSocketService.clearInitialNotification?.();
+
     if (autoRejectTimerRef.current) {
       clearTimeout(autoRejectTimerRef.current);
       autoRejectTimerRef.current = null;
@@ -100,7 +127,11 @@ export default function IncomingCallScreen({ route, navigation }) {
       senderId: receiverId,
       receiverId: callerId,
     });
-    navigation.goBack();
+    if (navigation.canGoBack()) {
+      navigation.goBack();
+    } else {
+      navigation.navigate("DriverHome");
+    }
   };
 
   return (
