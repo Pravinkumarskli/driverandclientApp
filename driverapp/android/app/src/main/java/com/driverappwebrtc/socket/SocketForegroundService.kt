@@ -1,24 +1,25 @@
 package com.driverappwebrtc.socket
 
-import android.Manifest
 import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.content.SharedPreferences
-import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.location.Location
-import android.location.LocationListener
-import android.location.LocationManager
 import android.os.Binder
 import android.os.Build
-import android.os.Bundle
 import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
-import androidx.core.content.ContextCompat
+import com.driverappwebrtc.socket.call.CallSocketHandler
+import com.driverappwebrtc.socket.chat.ChatSocketHandler
+import com.driverappwebrtc.socket.notifications.NotificationHelper
+import com.driverappwebrtc.socket.tracking.LocationTrackingManager
 import org.json.JSONObject
 
+/**
+ * SocketForegroundService — Main Android Foreground Service coordinator.
+ * Orchestrates NativeWebSocketManager, LocationTrackingManager, ChatSocketHandler, and CallSocketHandler.
+ */
 class SocketForegroundService : Service(), NativeWebSocketManager.SocketEventListener {
 
     companion object {
@@ -35,9 +36,6 @@ class SocketForegroundService : Service(), NativeWebSocketManager.SocketEventLis
         private const val KEY_USER_ID = "saved_user_id"
         private const val KEY_USER_TYPE = "saved_user_type"
 
-        const val LOCATION_UPDATE_INTERVAL_MS = 3000L
-        const val LOCATION_MIN_DISTANCE_M = 0f
-
         var isServiceRunning = false
             private set
 
@@ -52,10 +50,11 @@ class SocketForegroundService : Service(), NativeWebSocketManager.SocketEventLis
 
     private val binder = LocalBinder()
     private lateinit var notificationHelper: NotificationHelper
+    private lateinit var chatSocketHandler: ChatSocketHandler
+    private lateinit var callSocketHandler: CallSocketHandler
+    private lateinit var locationTrackingManager: LocationTrackingManager
     private var webSocketManager: NativeWebSocketManager? = null
     private var wakeLock: PowerManager.WakeLock? = null
-    private var locationManager: LocationManager? = null
-    private var isLocationTrackingStarted = false
 
     private var currentUserId: String = "driver_201"
     private var currentUserType: String = "driver"
@@ -67,26 +66,17 @@ class SocketForegroundService : Service(), NativeWebSocketManager.SocketEventLis
         fun getService(): SocketForegroundService = this@SocketForegroundService
     }
 
-    private val locationListener = object : LocationListener {
-        override fun onLocationChanged(location: Location) {
-            handleLocationUpdate(location)
-        }
-
-        override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
-        override fun onProviderEnabled(provider: String) {
-            Log.d(TAG, "Location provider enabled: $provider")
-        }
-        override fun onProviderDisabled(provider: String) {
-            Log.w(TAG, "Location provider disabled: $provider")
-        }
-    }
-
     override fun onCreate() {
         super.onCreate()
         try {
             notificationHelper = NotificationHelper(this)
+            chatSocketHandler = ChatSocketHandler(notificationHelper.chatNotificationManager)
+            callSocketHandler = CallSocketHandler(notificationHelper.callNotificationManager)
             webSocketManager = NativeWebSocketManager(this, this)
-            locationManager = getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+
+            locationTrackingManager = LocationTrackingManager(this) { location ->
+                handleLocationUpdate(location)
+            }
 
             val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
             wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "CabDriver:SocketWakeLock")
@@ -110,13 +100,11 @@ class SocketForegroundService : Service(), NativeWebSocketManager.SocketEventLis
         var userType = intent?.getStringExtra(EXTRA_USER_TYPE)
 
         if (url.isNullOrEmpty() || userId.isNullOrEmpty()) {
-            // Restore from SharedPreferences if killed/restarted by Android OS
             url = prefs.getString(KEY_URL, "") ?: ""
             userId = prefs.getString(KEY_USER_ID, "driver_201") ?: "driver_201"
             userType = prefs.getString(KEY_USER_TYPE, "driver") ?: "driver"
             Log.d(TAG, "Restored state from SharedPreferences: url=$url, userId=$userId, userType=$userType")
         } else {
-            // Save to SharedPreferences for future sticky restarts
             prefs.edit()
                 .putString(KEY_URL, url)
                 .putString(KEY_USER_ID, userId)
@@ -133,7 +121,6 @@ class SocketForegroundService : Service(), NativeWebSocketManager.SocketEventLis
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 var foregroundType = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                    // Android 14+
                     foregroundType = foregroundType or ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING
                 }
                 startForeground(
@@ -157,75 +144,9 @@ class SocketForegroundService : Service(), NativeWebSocketManager.SocketEventLis
             webSocketManager?.start(url, userId, currentUserType)
         }
 
-        startLocationTracking()
+        locationTrackingManager.startTracking()
 
         return START_STICKY
-    }
-
-    private fun startLocationTracking() {
-        if (isLocationTrackingStarted) return
-
-        val fineGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-        val coarseGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
-
-        if (!fineGranted && !coarseGranted) {
-            Log.w(TAG, "⚠️ Location permissions not granted yet. Cannot start native GPS updates.")
-            return
-        }
-
-        val lm = locationManager ?: return
-
-        try {
-            var requestedAny = false
-
-            if (lm.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
-                lm.requestLocationUpdates(
-                    LocationManager.GPS_PROVIDER,
-                    LOCATION_UPDATE_INTERVAL_MS,
-                    LOCATION_MIN_DISTANCE_M,
-                    locationListener
-                )
-                requestedAny = true
-                Log.d(TAG, "🛰️ GPS_PROVIDER requested (every ${LOCATION_UPDATE_INTERVAL_MS}ms)")
-            }
-
-            if (lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
-                lm.requestLocationUpdates(
-                    LocationManager.NETWORK_PROVIDER,
-                    LOCATION_UPDATE_INTERVAL_MS,
-                    LOCATION_MIN_DISTANCE_M,
-                    locationListener
-                )
-                requestedAny = true
-                Log.d(TAG, "📶 NETWORK_PROVIDER requested (every ${LOCATION_UPDATE_INTERVAL_MS}ms)")
-            }
-
-            if (requestedAny) {
-                isLocationTrackingStarted = true
-                // Fetch last known location immediately
-                val lastGps = lm.getLastKnownLocation(LocationManager.GPS_PROVIDER)
-                val lastNet = lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
-                val lastLoc = lastGps ?: lastNet
-                if (lastLoc != null) {
-                    handleLocationUpdate(lastLoc)
-                }
-            }
-        } catch (e: SecurityException) {
-            Log.e(TAG, "SecurityException starting location updates: ${e.message}", e)
-        } catch (e: Exception) {
-            Log.e(TAG, "Exception starting location updates: ${e.message}", e)
-        }
-    }
-
-    private fun stopLocationTracking() {
-        if (!isLocationTrackingStarted) return
-        try {
-            locationManager?.removeUpdates(locationListener)
-            isLocationTrackingStarted = false
-            Log.d(TAG, "Location updates stopped")
-        } catch (e: Exception) {
-            Log.e(TAG, "Error removing location updates: ${e.message}", e)
-        }
     }
 
     private fun handleLocationUpdate(location: Location) {
@@ -267,7 +188,7 @@ class SocketForegroundService : Service(), NativeWebSocketManager.SocketEventLis
 
     private fun stopServiceInternal() {
         isServiceRunning = false
-        stopLocationTracking()
+        locationTrackingManager.stopTracking()
         webSocketManager?.stop()
         try {
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -291,68 +212,28 @@ class SocketForegroundService : Service(), NativeWebSocketManager.SocketEventLis
         // 1. Forward directly to React Native JavaScript layer
         clientListener?.onMessageReceived(messageJson)
 
-        // 2. Display notification for chat messages and incoming calls
+        // 2. Delegate to specialized Chat & Call Handlers
         try {
             acquireWakeLock(15000)
             val json = JSONObject(messageJson)
-            val eventType = json.optString("type", "")
 
-            if (eventType == "chat" || eventType == "receiveMessage") {
-                val senderId = json.optString("senderId", "Customer")
-                val senderName = json.optString("senderName", senderId)
-                val message = json.optString("message", "New customer message")
-                val conversationId = json.optString("conversationId", "")
-                val userType = json.optString("senderType", "client")
-                val messageId = json.optString("messageId", json.optString("id", ""))
+            val isChat = chatSocketHandler.handleIncomingMessage(
+                json = json,
+                isAppInForeground = isAppInForeground,
+                currentActiveScreen = currentActiveScreen,
+                currentActivePeerId = currentActivePeerId,
+                currentActiveConversationId = currentActiveConversationId
+            )
 
-                // Check if driver is ALREADY on active chat screen with this customer
-                val isViewingThisChat = isAppInForeground &&
-                    (currentActiveScreen == "DriverChat" || currentActiveScreen == "CustomerChat" || currentActiveScreen == "Chat") &&
-                    (
-                        (!currentActiveConversationId.isNullOrEmpty() && currentActiveConversationId == conversationId) ||
-                        (!currentActivePeerId.isNullOrEmpty() && currentActivePeerId == senderId)
-                    )
-
-                if (!isViewingThisChat) {
-                    notificationHelper.showMessageNotification(
-                        senderId = senderId,
-                        senderName = senderName,
-                        messageText = message,
-                        conversationId = conversationId,
-                        userType = userType,
-                        messageId = messageId
-                    )
-                } else {
-                    Log.d(TAG, "Suppressed chat notification: driver is actively in chat screen with $senderId")
-                }
-            } else if (eventType == "incomingCall" || eventType == "callUser") {
-                val callerId = json.optString("callerId", json.optString("senderId", "Customer"))
-                val callerName = json.optString("callerName", json.optString("senderName", "Customer"))
-                val userType = json.optString("userType", json.optString("senderType", "client"))
-                val offerObj = json.opt("offer")
-                val offerJson = if (offerObj != null && offerObj != JSONObject.NULL) offerObj.toString() else ""
-
-                // Always show incoming call notification (even when app is open), only suppress if already on connected call
-                val isAlreadyInConnectedCall = isAppInForeground && (
-                    currentActiveScreen == "VoiceCallScreen" ||
-                    currentActiveScreen == "CustomerAnswerCallScreen"
+            if (!isChat) {
+                callSocketHandler.handleIncomingCallEvent(
+                    json = json,
+                    isAppInForeground = isAppInForeground,
+                    currentActiveScreen = currentActiveScreen
                 )
-
-                if (!isAlreadyInConnectedCall) {
-                    notificationHelper.showIncomingCallNotification(
-                        callerId = callerId,
-                        callerName = callerName,
-                        userType = userType,
-                        offerJson = offerJson
-                    )
-                } else {
-                    Log.d(TAG, "Suppressed incoming call notification: driver is already on connected call ($currentActiveScreen)")
-                }
-            } else if (eventType == "endCall" || eventType == "callEnded" || eventType == "callRejected") {
-                notificationHelper.cancelCallNotification()
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error displaying message/call notification: ${e.message}", e)
+            Log.e(TAG, "Error processing incoming message event: ${e.message}", e)
         }
     }
 
@@ -372,8 +253,7 @@ class SocketForegroundService : Service(), NativeWebSocketManager.SocketEventLis
 
     override fun onSocketConnected() {
         clientListener?.onSocketConnected()
-        // Ensure location updates are running
-        startLocationTracking()
+        locationTrackingManager.startTracking()
     }
 
     override fun onSocketRegistered(userId: String, userType: String) {
@@ -383,8 +263,7 @@ class SocketForegroundService : Service(), NativeWebSocketManager.SocketEventLis
             // Ignored
         }
         clientListener?.onSocketRegistered(userId, userType)
-        // Ensure location updates are running
-        startLocationTracking()
+        locationTrackingManager.startTracking()
     }
 
     override fun onError(errorMessage: String) {
@@ -400,7 +279,7 @@ class SocketForegroundService : Service(), NativeWebSocketManager.SocketEventLis
     }
 
     fun triggerLocationUpdate() {
-        startLocationTracking()
+        locationTrackingManager.startTracking()
     }
 
     private fun acquireWakeLock(durationMs: Long) {
@@ -416,7 +295,7 @@ class SocketForegroundService : Service(), NativeWebSocketManager.SocketEventLis
     override fun onDestroy() {
         super.onDestroy()
         isServiceRunning = false
-        stopLocationTracking()
+        locationTrackingManager.stopTracking()
         webSocketManager?.cleanup()
         if (wakeLock?.isHeld == true) {
             try {

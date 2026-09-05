@@ -9,8 +9,15 @@ import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
+import com.customerappwebrtc.socket.call.CallSocketHandler
+import com.customerappwebrtc.socket.chat.ChatSocketHandler
+import com.customerappwebrtc.socket.notifications.NotificationHelper
 import org.json.JSONObject
 
+/**
+ * SocketForegroundService — Main Foreground Service coordinator for clientapp.
+ * Orchestrates NativeWebSocketManager, ChatSocketHandler, and CallSocketHandler.
+ */
 class SocketForegroundService : Service(), NativeWebSocketManager.SocketEventListener {
 
     companion object {
@@ -36,6 +43,8 @@ class SocketForegroundService : Service(), NativeWebSocketManager.SocketEventLis
 
     private val binder = LocalBinder()
     private lateinit var notificationHelper: NotificationHelper
+    private lateinit var chatSocketHandler: ChatSocketHandler
+    private lateinit var callSocketHandler: CallSocketHandler
     private var webSocketManager: NativeWebSocketManager? = null
     private var wakeLock: PowerManager.WakeLock? = null
 
@@ -49,6 +58,8 @@ class SocketForegroundService : Service(), NativeWebSocketManager.SocketEventLis
         super.onCreate()
         try {
             notificationHelper = NotificationHelper(this)
+            chatSocketHandler = ChatSocketHandler(notificationHelper.chatNotificationManager)
+            callSocketHandler = CallSocketHandler(notificationHelper.callNotificationManager)
             webSocketManager = NativeWebSocketManager(this, this)
 
             val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -89,7 +100,6 @@ class SocketForegroundService : Service(), NativeWebSocketManager.SocketEventLis
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 var foregroundType = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                    // Android 14+
                     foregroundType = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC or ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING
                 }
                 startForeground(
@@ -140,65 +150,25 @@ class SocketForegroundService : Service(), NativeWebSocketManager.SocketEventLis
         // 1. Forward directly to React Native JavaScript layer
         clientListener?.onMessageReceived(messageJson)
 
-        // 2. Display notification for chat messages and incoming calls
+        // 2. Delegate to specialized Chat & Call Handlers
         try {
             acquireWakeLock(15000)
             val json = JSONObject(messageJson)
-            val eventType = json.optString("type", "")
 
-            if (eventType == "chat" || eventType == "receiveMessage") {
-                val senderId = json.optString("senderId", "Driver")
-                val senderName = json.optString("senderName", senderId)
-                val message = json.optString("message", "New message received")
-                val conversationId = json.optString("conversationId", "")
-                val userType = json.optString("senderType", "driver")
-                val messageId = json.optString("messageId", json.optString("id", ""))
+            val isChat = chatSocketHandler.handleIncomingMessage(
+                json = json,
+                isAppInForeground = isAppInForeground,
+                currentActiveScreen = currentActiveScreen,
+                currentActivePeerId = currentActivePeerId,
+                currentActiveConversationId = currentActiveConversationId
+            )
 
-                // Check if customer is ALREADY on active chat screen with this driver
-                val isViewingThisChat = isAppInForeground &&
-                    (currentActiveScreen == "CustomerChat" || currentActiveScreen == "DriverChat" || currentActiveScreen == "Chat") &&
-                    (
-                        (!currentActiveConversationId.isNullOrEmpty() && currentActiveConversationId == conversationId) ||
-                        (!currentActivePeerId.isNullOrEmpty() && currentActivePeerId == senderId)
-                    )
-
-                if (!isViewingThisChat) {
-                    notificationHelper.showMessageNotification(
-                        senderId = senderId,
-                        senderName = senderName,
-                        messageText = message,
-                        conversationId = conversationId,
-                        userType = userType,
-                        messageId = messageId
-                    )
-                } else {
-                    Log.d(TAG, "Suppressed chat notification: customer is actively in chat screen with $senderId")
-                }
-            } else if (eventType == "incomingCall" || eventType == "callUser") {
-                val callerId = json.optString("callerId", json.optString("senderId", "Driver"))
-                val callerName = json.optString("callerName", json.optString("senderName", "Driver"))
-                val userType = json.optString("userType", json.optString("senderType", "driver"))
-                val offerObj = json.opt("offer")
-                val offerJson = if (offerObj != null && offerObj != org.json.JSONObject.NULL) offerObj.toString() else ""
-
-                // Always show incoming call notification (even when app is open), only suppress if already on connected call
-                val isAlreadyInConnectedCall = isAppInForeground && (
-                    currentActiveScreen == "CustomerAnswerCallScreen" ||
-                    currentActiveScreen == "VoiceCallScreen"
+            if (!isChat) {
+                callSocketHandler.handleIncomingCallEvent(
+                    json = json,
+                    isAppInForeground = isAppInForeground,
+                    currentActiveScreen = currentActiveScreen
                 )
-
-                if (!isAlreadyInConnectedCall) {
-                    notificationHelper.showIncomingCallNotification(
-                        callerId = callerId,
-                        callerName = callerName,
-                        userType = userType,
-                        offerJson = offerJson
-                    )
-                } else {
-                    Log.d(TAG, "Suppressed incoming call notification: customer is already on connected call ($currentActiveScreen)")
-                }
-            } else if (eventType == "endCall" || eventType == "callEnded" || eventType == "callRejected") {
-                notificationHelper.cancelCallNotification()
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error displaying message/call notification: ${e.message}", e)
