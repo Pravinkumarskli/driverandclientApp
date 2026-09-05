@@ -81,6 +81,7 @@ export default function App() {
           receiverId: data.senderId,
           receiverName: data.receiverName || "Driver",
           messageId: data.messageId || "",
+          message: data.message || "",
         });
       }
     } catch (err) {

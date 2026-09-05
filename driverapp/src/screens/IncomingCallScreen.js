@@ -27,6 +27,7 @@ export default function IncomingCallScreen({ route, navigation }) {
   const AUTO_REJECT_TIMEOUT_MS = 40000; // 40 seconds auto-reject
 
   useEffect(() => {
+    NativeSocketService.setActiveScreen("IncomingCall", callerId, null);
     NativeSocketService.cancelCallNotification?.();
     NativeSocketService.clearInitialNotification?.();
 
@@ -34,7 +35,11 @@ export default function IncomingCallScreen({ route, navigation }) {
       console.log("⚡ [DRIVER] Auto-answering incoming call from notification action");
       handleAccept();
     }
-  }, []);
+
+    return () => {
+      NativeSocketService.setActiveScreen(null, null, null);
+    };
+  }, [callerId]);
 
   useEffect(() => {
     // Pulsating animation for incoming ring

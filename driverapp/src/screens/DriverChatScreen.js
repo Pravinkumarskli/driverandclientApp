@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
+  AppState,
   FlatList,
   KeyboardAvoidingView,
   Platform,
@@ -53,6 +54,30 @@ export default function DriverChatScreen({ route, navigation }) {
     });
   }, []);
 
+  // ─── If opened from a notification containing a message, ingest immediately ─
+  useEffect(() => {
+    if (route.params?.message) {
+      const notifMsgId = route.params.messageId || `${Date.now()}_notif`;
+      const notifMsg = {
+        id: notifMsgId,
+        messageId: notifMsgId,
+        conversationId,
+        senderId: receiverId,
+        receiverId: userId,
+        senderType: "client",
+        receiverType: "driver",
+        message: route.params.message,
+        type: "text",
+        messageType: "text",
+        timestamp: Date.now(),
+        status: "delivered",
+      };
+      console.log("📥 [DriverChat] Ingesting message directly from notification params:", notifMsg);
+      mergeMessage(notifMsg);
+      saveMessage(conversationId, notifMsg);
+    }
+  }, [conversationId, receiverId, userId, route.params?.message, route.params?.messageId, mergeMessage]);
+
   // ─── Load messages from AsyncStorage + fetch from server on screen open ───
   useEffect(() => {
     let isCancelled = false;
@@ -64,7 +89,7 @@ export default function DriverChatScreen({ route, navigation }) {
         setMessages(stored);
       }
 
-      // 2. Fetch server history (catches messages sent while app was closed)
+      // 2. Fetch server history (catches messages sent while app was closed or minimized)
       try {
         const serverMessages = await NativeSocketService.getMessages(userId, receiverId);
         if (!isCancelled && Array.isArray(serverMessages) && serverMessages.length > 0) {
@@ -96,10 +121,27 @@ export default function DriverChatScreen({ route, navigation }) {
 
     loadAndSync();
 
+    // Re-sync whenever app returns from minimized/background to foreground
+    const sub = AppState.addEventListener("change", (nextState) => {
+      if (nextState === "active") {
+        console.log("🔄 [DriverChat] App resumed to active — re-syncing messages");
+        loadAndSync();
+      }
+    });
+
     return () => {
       isCancelled = true;
+      sub?.remove();
     };
   }, [conversationId, userId, receiverId]);
+
+  // ─── Set active screen to suppress notifications while chatting ─────────
+  useEffect(() => {
+    NativeSocketService.setActiveScreen("DriverChat", receiverId, conversationId);
+    return () => {
+      NativeSocketService.setActiveScreen(null, null, null);
+    };
+  }, [receiverId, conversationId]);
 
   // ─── Native socket receive message listener ───────────────────────────────
   useEffect(() => {

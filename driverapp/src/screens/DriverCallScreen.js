@@ -36,9 +36,14 @@ export default function DriverCallScreen({ route, navigation }) {
   const RINGING_TIMEOUT_MS = 40000; // 40 seconds auto-cut
 
   useEffect(() => {
+    NativeSocketService.setActiveScreen("DriverCallScreen", receiverId, null);
     NativeSocketService.cancelCallNotification?.();
     NativeSocketService.clearInitialNotification?.();
-  }, []);
+
+    return () => {
+      NativeSocketService.setActiveScreen(null, null, null);
+    };
+  }, [receiverId]);
 
   // Pulse animation while ringing
   useEffect(() => {

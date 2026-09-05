@@ -28,13 +28,10 @@ export default function CustomerIncomingCallScreen({ route, navigation }) {
   const autoRejectTimerRef = useRef(null);
 
   const AUTO_REJECT_TIMEOUT_MS = 40000; // 40 seconds auto-reject
-
-  const [callStatus, setCallStatus] = useState("Incoming voice call...");
-  const [connected, setConnected] = useState(false);
-
   const pulse = useRef(new Animated.Value(1)).current;
 
   useEffect(() => {
+    NativeSocketService.setActiveScreen("CustomerIncomingCall", callerId, null);
     NativeSocketService.cancelCallNotification?.();
     NativeSocketService.clearInitialNotification?.();
 
@@ -42,7 +39,11 @@ export default function CustomerIncomingCallScreen({ route, navigation }) {
       console.log("⚡ [CLIENT] Auto-answering incoming call from notification action");
       acceptCall();
     }
-  }, []);
+
+    return () => {
+      NativeSocketService.setActiveScreen(null, null, null);
+    };
+  }, [callerId]);
 
   useEffect(() => {
     const animation = Animated.loop(

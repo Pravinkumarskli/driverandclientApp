@@ -43,6 +43,11 @@ class SocketForegroundService : Service(), NativeWebSocketManager.SocketEventLis
 
         // Default false: notifications will fire until JS runtime explicitly reports foreground
         var isAppInForeground = false
+
+        // Track currently active screen and conversation to suppress notifications when user is actively looking at it
+        var currentActiveScreen: String? = null
+        var currentActivePeerId: String? = null
+        var currentActiveConversationId: String? = null
     }
 
     private val binder = LocalBinder()
@@ -300,14 +305,26 @@ class SocketForegroundService : Service(), NativeWebSocketManager.SocketEventLis
                 val userType = json.optString("senderType", "client")
                 val messageId = json.optString("messageId", json.optString("id", ""))
 
-                notificationHelper.showMessageNotification(
-                    senderId = senderId,
-                    senderName = senderName,
-                    messageText = message,
-                    conversationId = conversationId,
-                    userType = userType,
-                    messageId = messageId
-                )
+                // Check if driver is ALREADY on active chat screen with this customer
+                val isViewingThisChat = isAppInForeground &&
+                    (currentActiveScreen == "DriverChat" || currentActiveScreen == "CustomerChat" || currentActiveScreen == "Chat") &&
+                    (
+                        (!currentActiveConversationId.isNullOrEmpty() && currentActiveConversationId == conversationId) ||
+                        (!currentActivePeerId.isNullOrEmpty() && currentActivePeerId == senderId)
+                    )
+
+                if (!isViewingThisChat) {
+                    notificationHelper.showMessageNotification(
+                        senderId = senderId,
+                        senderName = senderName,
+                        messageText = message,
+                        conversationId = conversationId,
+                        userType = userType,
+                        messageId = messageId
+                    )
+                } else {
+                    Log.d(TAG, "Suppressed chat notification: driver is actively in chat screen with $senderId")
+                }
             } else if (eventType == "incomingCall" || eventType == "callUser") {
                 val callerId = json.optString("callerId", json.optString("senderId", "Customer"))
                 val callerName = json.optString("callerName", json.optString("senderName", "Customer"))
@@ -315,12 +332,22 @@ class SocketForegroundService : Service(), NativeWebSocketManager.SocketEventLis
                 val offerObj = json.opt("offer")
                 val offerJson = if (offerObj != null && offerObj != JSONObject.NULL) offerObj.toString() else ""
 
-                notificationHelper.showIncomingCallNotification(
-                    callerId = callerId,
-                    callerName = callerName,
-                    userType = userType,
-                    offerJson = offerJson
+                // Always show incoming call notification (even when app is open), only suppress if already on connected call
+                val isAlreadyInConnectedCall = isAppInForeground && (
+                    currentActiveScreen == "VoiceCallScreen" ||
+                    currentActiveScreen == "CustomerAnswerCallScreen"
                 )
+
+                if (!isAlreadyInConnectedCall) {
+                    notificationHelper.showIncomingCallNotification(
+                        callerId = callerId,
+                        callerName = callerName,
+                        userType = userType,
+                        offerJson = offerJson
+                    )
+                } else {
+                    Log.d(TAG, "Suppressed incoming call notification: driver is already on connected call ($currentActiveScreen)")
+                }
             } else if (eventType == "endCall" || eventType == "callEnded" || eventType == "callRejected") {
                 notificationHelper.cancelCallNotification()
             }

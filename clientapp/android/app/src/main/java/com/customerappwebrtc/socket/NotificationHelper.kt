@@ -132,6 +132,7 @@ class NotificationHelper(private val context: Context) {
             putExtra("conversationId", conversationId)
             putExtra("userType", userType)
             putExtra("messageId", messageId)
+            putExtra("message", messageText)
             putExtra("action", "OPEN_CHAT")
         }
 

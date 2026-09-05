@@ -22,12 +22,24 @@ class NativeSocketModule(private val reactContext: ReactApplicationContext) :
         var pendingNotificationMap: Map<String, Any?>? = null
         var instance: NativeSocketModule? = null
 
-        fun dispatchNotificationIntent(paramsMap: Map<String, Any?>) {
+        fun savePendingNotification(context: Context, data: Map<String, Any?>) {
+            try {
+                val json = org.json.JSONObject()
+                data.forEach { (key, value) -> json.put(key, value) }
+                context.getSharedPreferences(NOTIFICATION_PREFS, Context.MODE_PRIVATE)
+                    .edit()
+                    .putString(PENDING_NOTIFICATION_KEY, json.toString())
+                    .apply()
+                Log.d(TAG, "💾 Saved pending notification to disk: $json")
+            } catch (e: Exception) {
+                Log.w(TAG, "Unable to persist notification intent: ${e.message}")
+            }
+        }
+
+        fun dispatchNotificationIntent(context: Context, paramsMap: Map<String, Any?>) {
             Log.d(TAG, "🔔 dispatchNotificationIntent called with action=${paramsMap["action"]}")
             pendingNotificationMap = paramsMap
-            // A static field is lost when Android recreates the process. Keep the tap
-            // payload on disk until JavaScript confirms that it has handled it.
-            instance?.savePendingNotification(paramsMap)
+            savePendingNotification(context, paramsMap)
             instance?.let { module ->
                 try {
                     val map = Arguments.createMap().apply {
@@ -52,19 +64,6 @@ class NativeSocketModule(private val reactContext: ReactApplicationContext) :
 
     init {
         instance = this
-    }
-
-    private fun savePendingNotification(data: Map<String, Any?>) {
-        try {
-            val json = JSONObject()
-            data.forEach { (key, value) -> json.put(key, value) }
-            reactContext.getSharedPreferences(NOTIFICATION_PREFS, Context.MODE_PRIVATE)
-                .edit()
-                .putString(PENDING_NOTIFICATION_KEY, json.toString())
-                .apply()
-        } catch (e: Exception) {
-            Log.w(TAG, "Unable to persist notification intent: ${e.message}")
-        }
     }
 
     private fun readPendingNotification(): Map<String, Any?>? {
@@ -204,6 +203,19 @@ class NativeSocketModule(private val reactContext: ReactApplicationContext) :
     fun setAppForegroundState(isForeground: Boolean) {
         Log.d(TAG, "setAppForegroundState: $isForeground")
         SocketForegroundService.isAppInForeground = isForeground
+        if (!isForeground) {
+            SocketForegroundService.currentActiveScreen = null
+            SocketForegroundService.currentActivePeerId = null
+            SocketForegroundService.currentActiveConversationId = null
+        }
+    }
+
+    @ReactMethod
+    fun setActiveScreen(screenName: String?, peerId: String?, conversationId: String?) {
+        Log.d(TAG, "setActiveScreen: screen=$screenName, peerId=$peerId, conversationId=$conversationId")
+        SocketForegroundService.currentActiveScreen = screenName
+        SocketForegroundService.currentActivePeerId = peerId
+        SocketForegroundService.currentActiveConversationId = conversationId
     }
 
     @ReactMethod

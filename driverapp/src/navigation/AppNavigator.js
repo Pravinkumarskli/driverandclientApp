@@ -79,6 +79,7 @@ export default function AppNavigator() {
           receiverId: data.senderId,
           receiverName: data.receiverName || "Customer",
           messageId: data.messageId || "",
+          message: data.message || "",
         });
       }
     } catch (err) {

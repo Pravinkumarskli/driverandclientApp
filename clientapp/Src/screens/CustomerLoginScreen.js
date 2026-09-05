@@ -89,12 +89,19 @@ export default function CustomerLoginScreen({ navigation }) {
                 receiverId: initialNotif.senderId,
                 receiverName: initialNotif.receiverName || "Driver",
                 messageId: initialNotif.messageId || "",
+                message: initialNotif.message || "",
               });
               return;
             }
           }
 
           if (!isMounted) return;
+          const currentRoute = navigation.getState()?.routes?.[navigation.getState()?.index]?.name;
+          if (currentRoute && currentRoute !== "CustomerLogin") {
+            console.log("⚡ [AUTO-LOGIN CUSTOMER] Already on screen:", currentRoute, "- skipping replace with CustomerHomeScreen");
+            return;
+          }
+
           navigation.replace("CustomerHomeScreen", {
             userId: savedSession.userId,
             userName: savedSession.userName || savedSession.userId,

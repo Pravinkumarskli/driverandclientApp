@@ -37,6 +37,7 @@ class MainActivity : ReactActivity() {
       val conversationId = intent.getStringExtra("conversationId") ?: ""
       val userType = intent.getStringExtra("userType") ?: "client"
       val messageId = intent.getStringExtra("messageId") ?: ""
+      val message = intent.getStringExtra("message") ?: ""
 
       val map = mapOf(
         "senderId" to senderId,
@@ -45,8 +46,11 @@ class MainActivity : ReactActivity() {
         "conversationId" to conversationId,
         "userType" to userType,
         "messageId" to messageId,
+        "message" to message,
         "action" to "OPEN_CHAT"
       )
+
+      NativeSocketModule.dispatchNotificationIntent(this, map)
 
       // Consume intent extras to prevent duplicate handling on app reopen
       intent.removeExtra("action")
@@ -55,9 +59,8 @@ class MainActivity : ReactActivity() {
       intent.removeExtra("receiverName")
       intent.removeExtra("conversationId")
       intent.removeExtra("messageId")
+      intent.removeExtra("message")
       intent.action = null
-
-      NativeSocketModule.dispatchNotificationIntent(map)
     } else if (action == "INCOMING_CALL" || action.contains("INCOMING_CALL") || action.contains("ANSWER_CALL")) {
       val callerId = intent.getStringExtra("callerId") ?: intent.getStringExtra("senderId") ?: "Customer"
       val callerName = intent.getStringExtra("callerName") ?: intent.getStringExtra("receiverName") ?: "Customer"
@@ -76,6 +79,8 @@ class MainActivity : ReactActivity() {
         "action" to "INCOMING_CALL"
       )
 
+      NativeSocketModule.dispatchNotificationIntent(this, map)
+
       // Consume intent extras to prevent duplicate handling on app reopen
       intent.removeExtra("action")
       intent.removeExtra("callerId")
@@ -85,8 +90,6 @@ class MainActivity : ReactActivity() {
       intent.removeExtra("offer")
       intent.removeExtra("autoAnswer")
       intent.action = null
-
-      NativeSocketModule.dispatchNotificationIntent(map)
     }
   }
 }

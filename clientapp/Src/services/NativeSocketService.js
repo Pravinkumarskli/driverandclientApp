@@ -281,12 +281,26 @@ class NativeSocketService {
     }
   }
 
+  // Set active screen for conditional notification suppression
+  setActiveScreen(screenName, peerId = null, conversationId = null) {
+    if (Platform.OS === "android" && NativeSocketModule?.setActiveScreen) {
+      try {
+        NativeSocketModule.setActiveScreen(screenName, peerId, conversationId);
+      } catch (e) {
+        console.warn("[NativeSocketService] setActiveScreen error:", e);
+      }
+    }
+  }
+
   // Sync AppState (Foreground vs Background) with Native Service
   setupAppStateListener() {
     AppState.addEventListener("change", (nextAppState) => {
       const isForeground = nextAppState === "active";
       if (NativeSocketModule?.setAppForegroundState) {
         NativeSocketModule.setAppForegroundState(isForeground);
+      }
+      if (!isForeground) {
+        this.setActiveScreen(null, null, null);
       }
     });
 

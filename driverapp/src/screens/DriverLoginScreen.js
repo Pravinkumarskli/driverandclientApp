@@ -98,9 +98,16 @@ export default function DriverLoginScreen({ navigation }) {
                 receiverId: initialNotif.senderId,
                 receiverName: initialNotif.receiverName || "Customer",
                 messageId: initialNotif.messageId || "",
+                message: initialNotif.message || "",
               });
               return;
             }
+          }
+
+          const currentRoute = navigation.getState()?.routes?.[navigation.getState()?.index]?.name;
+          if (currentRoute && currentRoute !== "DriverLogin") {
+            console.log("⚡ [AUTO-LOGIN DRIVER] Already on screen:", currentRoute, "- skipping replace with DriverHome");
+            return;
           }
 
           navigation.replace("DriverHome", {

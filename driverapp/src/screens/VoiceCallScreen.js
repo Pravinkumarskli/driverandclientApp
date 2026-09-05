@@ -31,11 +31,18 @@ export default function VoiceCallScreen({ route, navigation }) {
 
   const timerRef = useRef(null);
 
-  // Call duration timer
   useEffect(() => {
+    NativeSocketService.setActiveScreen("VoiceCallScreen", callerId, null);
     NativeSocketService.cancelCallNotification?.();
     NativeSocketService.clearInitialNotification?.();
 
+    return () => {
+      NativeSocketService.setActiveScreen(null, null, null);
+    };
+  }, [callerId]);
+
+  // Call duration timer
+  useEffect(() => {
     if (connected) {
       timerRef.current = setInterval(() => {
         setCallSeconds((s) => s + 1);

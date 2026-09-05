@@ -37,9 +37,14 @@ export default function CustomerCallScreen({ route, navigation }) {
   const RINGING_TIMEOUT_MS = 40000; // 40 seconds auto-cut
 
   useEffect(() => {
+    NativeSocketService.setActiveScreen("CustomerCallScreen", receiverId, null);
     NativeSocketService.cancelCallNotification?.();
     NativeSocketService.clearInitialNotification?.();
-  }, []);
+
+    return () => {
+      NativeSocketService.setActiveScreen(null, null, null);
+    };
+  }, [receiverId]);
 
   // Pulse animation for avatar while ringing
   useEffect(() => {

@@ -18,6 +18,7 @@ const CustomerAnswerCallScreen = ({ route, navigation }) => {
   // -----------------------------
 
   useEffect(() => {
+    NativeSocketService.setActiveScreen("CustomerAnswerCallScreen", callerId, null);
     NativeSocketService.cancelCallNotification?.();
     NativeSocketService.clearInitialNotification?.();
 
@@ -42,10 +43,11 @@ const CustomerAnswerCallScreen = ({ route, navigation }) => {
     return () => {
       clearInterval(timer);
       SocketService.off("callEnded", handleCallEnded);
+      NativeSocketService.setActiveScreen(null, null, null);
       NativeSocketService.cancelCallNotification?.();
       NativeSocketService.clearInitialNotification?.();
     };
-  }, [navigation]);
+  }, [navigation, callerId]);
 
   // -----------------------------
   // FORMAT DURATION

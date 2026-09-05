@@ -16,12 +16,29 @@ class NativeSocketModule(private val reactContext: ReactApplicationContext) :
     companion object {
         const val MODULE_NAME = "NativeSocketModule"
         private const val TAG = "NativeSocketModule_Driver"
+        private const val NOTIFICATION_PREFS = "CabDriverNotificationPrefs"
+        private const val PENDING_NOTIFICATION_KEY = "pendingNotification"
         var pendingNotificationMap: Map<String, Any?>? = null
         var instance: NativeSocketModule? = null
 
-        fun dispatchNotificationIntent(paramsMap: Map<String, Any?>) {
+        fun savePendingNotification(context: Context, data: Map<String, Any?>) {
+            try {
+                val json = org.json.JSONObject()
+                data.forEach { (key, value) -> json.put(key, value) }
+                context.getSharedPreferences(NOTIFICATION_PREFS, Context.MODE_PRIVATE)
+                    .edit()
+                    .putString(PENDING_NOTIFICATION_KEY, json.toString())
+                    .apply()
+                Log.d(TAG, "💾 Saved pending notification to disk: $json")
+            } catch (e: Exception) {
+                Log.w(TAG, "Unable to persist notification intent: ${e.message}")
+            }
+        }
+
+        fun dispatchNotificationIntent(context: Context, paramsMap: Map<String, Any?>) {
             Log.d(TAG, "🔔 dispatchNotificationIntent called with action=${paramsMap["action"]}")
             pendingNotificationMap = paramsMap
+            savePendingNotification(context, paramsMap)
             instance?.let { module ->
                 try {
                     val map = Arguments.createMap().apply {
@@ -37,7 +54,6 @@ class NativeSocketModule(private val reactContext: ReactApplicationContext) :
                     }
                     module.sendEvent("onNotificationOpened", map)
                     Log.d(TAG, "🔔 Dispatched onNotificationOpened event to active React context")
-                    pendingNotificationMap = null
                 } catch (e: Exception) {
                     Log.w(TAG, "Error emitting onNotificationOpened event: ${e.message}")
                 }
@@ -167,6 +183,20 @@ class NativeSocketModule(private val reactContext: ReactApplicationContext) :
     fun setAppForegroundState(isForeground: Boolean) {
         Log.d(TAG, "setAppForegroundState: $isForeground")
         SocketForegroundService.isAppInForeground = isForeground
+        if (!isForeground) {
+            // When app moves to background, clear active screen so all notifications show
+            SocketForegroundService.currentActiveScreen = null
+            SocketForegroundService.currentActivePeerId = null
+            SocketForegroundService.currentActiveConversationId = null
+        }
+    }
+
+    @ReactMethod
+    fun setActiveScreen(screenName: String?, peerId: String?, conversationId: String?) {
+        Log.d(TAG, "setActiveScreen: screen=$screenName, peerId=$peerId, conversationId=$conversationId")
+        SocketForegroundService.currentActiveScreen = screenName
+        SocketForegroundService.currentActivePeerId = peerId
+        SocketForegroundService.currentActiveConversationId = conversationId
     }
 
     @ReactMethod
@@ -175,9 +205,28 @@ class NativeSocketModule(private val reactContext: ReactApplicationContext) :
         promise.resolve(isConnected)
     }
 
+    private fun readPendingNotification(): Map<String, Any?>? {
+        pendingNotificationMap?.let { return it }
+        return try {
+            val raw = reactContext.getSharedPreferences(NOTIFICATION_PREFS, Context.MODE_PRIVATE)
+                .getString(PENDING_NOTIFICATION_KEY, null) ?: return null
+            val json = org.json.JSONObject(raw)
+            buildMap {
+                val keys = json.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    put(key, json.get(key))
+                }
+            }.also { pendingNotificationMap = it }
+        } catch (e: Exception) {
+            Log.w(TAG, "Unable to read pending notification intent: ${e.message}")
+            null
+        }
+    }
+
     @ReactMethod
     fun getInitialNotification(promise: Promise) {
-        val data = pendingNotificationMap
+        val data = readPendingNotification()
         Log.d(TAG, "🔔 getInitialNotification called, returning: $data")
         if (data != null) {
             val map = Arguments.createMap().apply {
@@ -201,6 +250,10 @@ class NativeSocketModule(private val reactContext: ReactApplicationContext) :
     fun clearInitialNotification(promise: Promise) {
         Log.d(TAG, "🔔 clearInitialNotification called")
         pendingNotificationMap = null
+        reactContext.getSharedPreferences(NOTIFICATION_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .remove(PENDING_NOTIFICATION_KEY)
+            .apply()
         promise.resolve(true)
     }
 
